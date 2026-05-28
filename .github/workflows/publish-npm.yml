@@ -1,0 +1,59 @@
+name: Publish npm package
+
+on:
+  push:
+    tags:
+      - 'npm-v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (skip actual publish)'
+        type: boolean
+        default: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '10.33.2'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build npm package
+        run: node npm-package/scripts/build.mjs
+
+      - name: Verify package
+        working-directory: npm-package
+        run: |
+          node bin/open-design.mjs --help
+          echo "Package structure:"
+          ls -la apps/daemon/dist/ apps/web/out/ skills/ design-systems/ 2>/dev/null | head -20
+          echo "Bundle size:"
+          du -sh apps/daemon/dist/cli.js
+          echo "Total package size:"
+          du -sh --exclude=node_modules .
+
+      - name: Publish to npm
+        if: ${{ !inputs.dry_run }}
+        working-directory: npm-package
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Dry run publish
+        if: ${{ inputs.dry_run }}
+        working-directory: npm-package
+        run: npm publish --dry-run

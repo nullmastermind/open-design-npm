@@ -1,0 +1,4 @@
+node_modules
+scripts
+esbuild.config.mjs
+.gitignore

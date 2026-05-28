@@ -1,0 +1,46 @@
+{
+  "name": "@spec-ade/open-design",
+  "version": "0.8.3",
+  "description": "Local-first design product: detects your installed code-agent CLI, runs design skills + design systems, streams artifacts into a sandboxed preview.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "open-design": "./bin/open-design.mjs"
+  },
+  "files": [
+    "bin",
+    "apps/daemon/dist",
+    "apps/web/out",
+    "skills",
+    "design-systems",
+    "design-templates",
+    "craft",
+    "assets",
+    "prompt-templates",
+    "plugins",
+    "README.md"
+  ],
+  "scripts": {
+    "prepublishOnly": "npm version patch --no-git-tag-version && node scripts/build.mjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "12.10.0",
+    "blake3-wasm": "2.1.5"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nicepkg/open-design.git",
+    "directory": "npm-package"
+  },
+  "keywords": [
+    "design",
+    "ai",
+    "agent",
+    "cli",
+    "local-first",
+    "open-design"
+  ]
+}
