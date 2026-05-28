@@ -21,7 +21,7 @@
     "README.md"
   ],
   "scripts": {
-    "prepublishOnly": "npm version patch --no-git-tag-version && node scripts/build.mjs"
+    "prepublishOnly": "echo skipped"
   },
   "dependencies": {
     "better-sqlite3": "12.10.0",
