@@ -21,7 +21,7 @@ const result = await build({
   platform: 'node',
   target: 'node20',
   outfile: join(__dirname, 'apps/daemon/dist/cli.js'),
-  external: ['better-sqlite3', 'blake3-wasm'],
+  external: ['better-sqlite3', 'blake3-wasm', 'playwright-core', 'chromium-bidi'],
   banner: {
     js: [
       'import { createRequire as __bundleCreateRequire } from "node:module";',
