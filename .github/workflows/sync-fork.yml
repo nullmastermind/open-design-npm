@@ -42,10 +42,20 @@ jobs:
       - name: Merge upstream/main
         if: steps.check.outputs.has_updates == 'true'
         run: |
-          git merge upstream/main -X ours --no-edit || {
-            echo "Merge failed completely."
-            exit 1
-          }
+          if git merge upstream/main -X ours --no-edit; then
+            echo "Merge completed cleanly."
+          else
+            # Resolve modify/delete conflicts by removing those files (we deleted them intentionally)
+            conflicts=$(git diff --name-only --diff-filter=U)
+            if [ -z "$conflicts" ]; then
+              echo "Merge failed with no resolvable conflicts."
+              exit 1
+            fi
+            echo "Resolving modify/delete conflicts by removing:"
+            echo "$conflicts"
+            echo "$conflicts" | xargs -r git rm -f
+            git commit --no-edit
+          fi
 
       - name: Remove unwanted workflow files
         if: steps.check.outputs.has_updates == 'true'
