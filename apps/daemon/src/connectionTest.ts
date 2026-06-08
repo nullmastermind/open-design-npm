@@ -46,12 +46,14 @@ import {
   cursorAuthGuidance,
   probeAgentAuthStatus,
 } from './runtimes/auth.js';
+import { loadMmdRouteLaunchEnv } from './runtimes/mmd-routes.js';
 import {
   buildLegacyMaxTokensParam,
   buildMaxCompletionTokensParam,
   buildOpenAIChatTokenParam,
   isUnsupportedMaxTokensError,
 } from './openai-chat-token-params.js';
+import { aihubmixHeaders } from './aihubmix.js';
 import type { AgentCliEnvPrefs } from './app-config.js';
 import type { RuntimeAgentDef } from './runtimes/types.js';
 import { resolveModelForAgent } from './runtimes/models.js';
@@ -168,6 +170,27 @@ export async function assertExternalAssetUrl(
     };
   }
   return { ok: true };
+}
+
+/**
+ * Validate an upstream-controlled asset URL and fetch it with the SSRF guard
+ * pinned through redirects. Runs `assertExternalAssetUrl` on the literal URL
+ * and forces `redirect: 'error'`, so a validated public URL that 302s into
+ * loopback / RFC1918 / metadata space is rejected before any bytes are read.
+ *
+ * Throws on a blocked host — so the redirect bypass is impossible to forget at
+ * call sites — and the platform fetch additionally throws when `redirect:
+ * 'error'` encounters a 3xx. Callers keep their own `!resp.ok` HTTP-status
+ * handling. The forced `redirect` is spread last so it overrides any value the
+ * caller passed in `init`.
+ */
+export async function assertAndFetchExternalAsset(
+  url: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const check = await assertExternalAssetUrl(url);
+  if (!check.ok) throw new Error(check.error);
+  return fetch(url, { ...init, redirect: 'error' });
 }
 
 // Aggressive but not punitive — happy paths usually return in under 2 s.
@@ -697,9 +720,11 @@ function inspectProviderCompletion(
   const obj = data && typeof data === 'object' ? data as Record<string, unknown> : null;
   if (!obj) return { valid: false };
 
-  if (protocol === 'openai' || protocol === 'azure' || protocol === 'senseaudio') {
+  if (protocol === 'openai' || protocol === 'azure' || protocol === 'senseaudio' || protocol === 'aihubmix') {
     const responseModel = typeof obj.model === 'string' ? obj.model : '';
     if (
+      // AIHubMix is omitted from the strict response-model check (like Azure):
+      // its gateway routes by model name and may echo a normalized id.
       (protocol === 'openai' || protocol === 'senseaudio') &&
       enforceResponseModel &&
       responseModel &&
@@ -859,6 +884,118 @@ async function validateLocalOpenAiModel(
   };
 }
 
+function isSenseAudioNonChatModel(model: string): boolean {
+  return (
+    model.startsWith('senseaudio-image-') ||
+    model.startsWith('doubao-seedream-') ||
+    model === 'sensenova-u1-fast' ||
+    model.startsWith('doubao-seedance-') ||
+    model.startsWith('senseaudio-asr-') ||
+    model.startsWith('senseaudio-tts-') ||
+    model.startsWith('senseaudio-music-')
+  );
+}
+
+async function validateSenseAudioNonChatModel(
+  input: ProviderTestRequest,
+  signal: AbortSignal,
+  start: number,
+  requestInit: Pick<RequestInit, 'dispatcher'> = {},
+): Promise<ConnectionTestResponse | null> {
+  if (input.protocol !== 'senseaudio' || !isSenseAudioNonChatModel(input.model)) {
+    return null;
+  }
+
+  const url = appendVersionedApiPath(String(input.baseUrl), '/models');
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...requestInit,
+      method: 'GET',
+      headers: { authorization: `Bearer ${String(input.apiKey)}` },
+      signal,
+      redirect: 'error',
+    });
+  } catch (err) {
+    const latencyMs = Date.now() - start;
+    const kind = networkErrorToKind(err);
+    return {
+      ok: false,
+      kind,
+      latencyMs,
+      model: input.model,
+      detail: redactSecrets(err instanceof Error ? err.message : String(err), [
+        input.apiKey,
+      ]),
+    };
+  }
+
+  const latencyMs = Date.now() - start;
+  let rawText = '';
+  let data: unknown = {};
+  let parseError: unknown = null;
+  try {
+    rawText = await response.text();
+  } catch {
+    rawText = '';
+  }
+  try {
+    data = rawText ? JSON.parse(rawText) : {};
+  } catch (err) {
+    parseError = err;
+  }
+
+  if (parseError && response.ok) {
+    return {
+      ok: false,
+      kind: 'unknown',
+      latencyMs,
+      model: input.model,
+      status: response.status,
+      detail: redactSecrets(
+        parseError instanceof Error ? parseError.message : String(parseError),
+        [input.apiKey],
+      ),
+    };
+  }
+
+  if (!response.ok) {
+    const redactedDetail = redactSecrets(
+      extractProviderErrorDetail(data, rawText).slice(0, 240),
+      [input.apiKey],
+    );
+    return {
+      ok: false,
+      kind: statusToKind(response.status, redactedDetail),
+      latencyMs,
+      model: input.model,
+      status: response.status,
+      detail: redactedDetail,
+    };
+  }
+
+  const modelIds = extractOpenAiModelIds(data);
+  if (!modelIds.includes(input.model)) {
+    return {
+      ok: false,
+      kind: 'not_found_model',
+      latencyMs,
+      model: input.model,
+      status: response.status,
+      detail: `Model "${input.model}" is not reported by SenseAudio /models.`,
+    };
+  }
+
+  return {
+    ok: true,
+    kind: 'success',
+    latencyMs,
+    model: input.model,
+    status: response.status,
+    detail: 'SenseAudio model is available, but this media model is not chat-testable from Settings.',
+  };
+}
+
 interface ProviderCallShape {
   url: string;
   headers: Record<string, string>;
@@ -902,6 +1039,24 @@ function buildProviderCall(input: ProviderTestRequest): ProviderCallShape {
           return '';
         },
       };
+    case 'aihubmix':
+      // AIHubMix is wire-compatible with OpenAI but carries the fixed APP-Code
+      // attribution header on every request (see aihubmixHeaders). Same body /
+      // response shape as the OpenAI case otherwise.
+      return {
+        url: appendVersionedApiPath(baseUrl, '/chat/completions'),
+        headers: {
+          'content-type': 'application/json',
+          ...aihubmixHeaders(apiKey),
+        },
+        body: {
+          model,
+          ...buildOpenAIChatTokenParam(model, PROVIDER_MAX_TOKENS),
+          messages: [{ role: 'user', content: SMOKE_PROMPT }],
+          stream: false,
+        },
+        extractText: extractOpenAIMessageText,
+      };
     case 'openai':
     case 'senseaudio':
       // SenseAudio is wire-compatible with OpenAI (POST /v1/chat/completions,
@@ -914,6 +1069,10 @@ function buildProviderCall(input: ProviderTestRequest): ProviderCallShape {
         headers: {
           'content-type': 'application/json',
           authorization: `Bearer ${apiKey}`,
+          ...(new URL(baseUrl).hostname === 'openrouter.ai' ? {
+            'HTTP-Referer': 'https://opendesign.dev',
+            'X-Title': 'Open Design',
+          } : {}),
         },
         body: {
           model,
@@ -1083,6 +1242,14 @@ export async function testProviderConnection(
       proxyDispatcher.requestInit,
     );
     if (modelError) return modelError;
+
+    const senseAudioNonChatResult = await validateSenseAudioNonChatModel(
+      input,
+      controller.signal,
+      start,
+      proxyDispatcher.requestInit,
+    );
+    if (senseAudioNonChatResult) return senseAudioNonChatResult;
 
     const requestInit = {
       ...proxyDispatcher.requestInit,
@@ -1742,9 +1909,24 @@ async function testAgentConnectionInternal(
         ...(def.env || {}),
       },
       configuredAgentEnv,
+      undefined,
+      { resolvedBin: executableResolution.selectedPath },
     );
-    const env = applyAgentLaunchEnv(baseEnv, executableResolution);
-    const auth = await probeAgentAuthStatus(input.agentId, executableResolution.launchPath, env);
+    const mmdRouteLaunchEnv = input.agentId === 'claude'
+      ? await loadMmdRouteLaunchEnv(
+          {
+            ...process.env,
+            ...(def.env || {}),
+            ...configuredAgentEnv,
+          },
+          model,
+        ).catch(() => null)
+      : null;
+    const env = applyAgentLaunchEnv({
+      ...baseEnv,
+      ...(mmdRouteLaunchEnv || {}),
+    }, executableResolution);
+    const auth = await probeAgentAuthStatus(def, executableResolution.launchPath, env);
     if (auth?.status === 'missing') {
       // Preflight auth probe runs after binary resolution but before the
       // smoke spawn — phase is still 'binary_resolution'. The smoke
@@ -1906,6 +2088,7 @@ async function testAgentConnectionInternal(
         stderrTail,
         stdoutTail: rawStdoutTail || buffered,
         env,
+        resolvedBin: executableResolution.selectedPath,
       });
       if (claudeDiagnostic) {
         console.warn(

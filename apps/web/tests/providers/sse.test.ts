@@ -4,6 +4,7 @@ import {
   buildDaemonTranscript,
   latestUserPromptFromHistory,
   reattachDaemonRun,
+  sanitizePriorAssistantTurnForTranscript,
   streamViaDaemon,
 } from '../../src/providers/daemon';
 import { streamMessageOpenAI } from '../../src/providers/openai-compatible';
@@ -65,6 +66,66 @@ describe('streamViaDaemon', () => {
     expect(body.message).toContain('pre-consent brief');
     expect(body.message).toContain('post-consent revision');
     expect(body.currentPrompt).toBe('post-consent revision');
+  });
+
+  it('sends run-scoped media execution policy to the daemon', async () => {
+    const handlers = createDaemonHandlers();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/runs') return jsonResponse({ runId: 'run-1' });
+      if (url === '/api/runs/run-1/events') {
+        return sseResponse('event: end\ndata: {"code":0,"status":"succeeded"}\n\n');
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await streamViaDaemon({
+      agentId: 'mock',
+      history: [{ id: '1', role: 'user', content: 'make an image' }],
+      systemPrompt: '',
+      signal: new AbortController().signal,
+      handlers,
+      mediaExecution: {
+        mode: 'enabled',
+        allowedSurfaces: ['image'],
+        allowedModels: ['doubao-seedream-3-0-t2i-250415'],
+      },
+    });
+
+    const [, createRunInit] = fetchMock.mock.calls[0] as unknown as [RequestInfo | URL, RequestInit];
+    const body = JSON.parse(String(createRunInit.body));
+    expect(body.mediaExecution).toEqual({
+      mode: 'enabled',
+      allowedSurfaces: ['image'],
+      allowedModels: ['doubao-seedream-3-0-t2i-250415'],
+    });
+  });
+
+  it('sends the applied plugin snapshot id to the daemon', async () => {
+    const handlers = createDaemonHandlers();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/runs') return jsonResponse({ runId: 'run-1' });
+      if (url === '/api/runs/run-1/events') {
+        return sseResponse('event: end\ndata: {"code":0,"status":"succeeded"}\n\n');
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await streamViaDaemon({
+      agentId: 'mock',
+      history: [{ id: '1', role: 'user', content: 'use the plugin' }],
+      systemPrompt: '',
+      signal: new AbortController().signal,
+      handlers,
+      appliedPluginSnapshotId: 'snap-plugin-1',
+    });
+
+    const [, createRunInit] = fetchMock.mock.calls[0] as unknown as [RequestInfo | URL, RequestInit];
+    const body = JSON.parse(String(createRunInit.body));
+    expect(body.appliedPluginSnapshotId).toBe('snap-plugin-1');
   });
 
   it('drops prior assistant turns from another agent when composing daemon transcript', async () => {
@@ -143,6 +204,115 @@ describe('streamViaDaemon', () => {
     expect(transcript).toContain('[Open Design truncated 1000 chars from this prior message');
     expect(transcript).not.toContain('x'.repeat(13_000));
     expect(transcript).toContain('small answer');
+  });
+
+  // PR #3157 form-loop investigation: weak / medium plain-stream models
+  // (GPT-OSS-120B Medium, Gemini 3.5 Flash through Antigravity's `agy`)
+  // pattern-match on the literal `<question-form>` markup the agent
+  // emitted on turn 1 and re-emit an identical form on turn 2 even when
+  // the OD-side OVERRIDE block explicitly forbids it. Stripping the
+  // markup from prior assistant turns at the transcript layer kills the
+  // echo source entirely.
+  it('strips question-form markup from prior assistant turns to kill the form-echo loop', () => {
+    const sanitized = sanitizePriorAssistantTurnForTranscript(
+      [
+        'Got it — let me ask a few questions:',
+        '',
+        '<question-form id="discovery" title="Quick brief — 30 seconds">',
+        '{',
+        '  "description": "I will lock the brief.",',
+        '  "questions": [{ "id": "output", "label": "What are we making?" }]',
+        '}',
+        '</question-form>',
+      ].join('\n'),
+    );
+
+    expect(sanitized).not.toContain('<question-form');
+    expect(sanitized).not.toContain('</question-form>');
+    expect(sanitized).not.toContain('"questions": [');
+    expect(sanitized).toContain('question-form was emitted here on a prior turn');
+  });
+
+  it('also strips ```json fenced form-schema echoes that some models add alongside the form tag', () => {
+    const sanitized = sanitizePriorAssistantTurnForTranscript(
+      [
+        'Got it — 请告诉我以下信息：',
+        '',
+        '```json',
+        '{',
+        '  "title": "快速简报 — 30 秒",',
+        '  "questions": [',
+        '    { "id": "output", "label": "我们要做什么？" }',
+        '  ]',
+        '}',
+        '```',
+        '',
+        '<question-form id="discovery" title="快速简报 — 30 秒">',
+        '{ "questions": [] }',
+        '</question-form>',
+      ].join('\n'),
+    );
+
+    expect(sanitized).not.toContain('```json');
+    expect(sanitized).not.toContain('<question-form');
+    expect(sanitized).toContain('form schema was echoed here on a prior turn');
+  });
+
+  it('preserves unrelated ```json fences (regular JSON snippets without "questions") so model output stays intact', () => {
+    const original = [
+      'Here is the config you asked about:',
+      '',
+      '```json',
+      '{ "endpoint": "https://api.example.com", "version": 2 }',
+      '```',
+    ].join('\n');
+    const sanitized = sanitizePriorAssistantTurnForTranscript(original);
+
+    // No `"questions"` key → fence is NOT stripped.
+    expect(sanitized).toBe(original);
+  });
+
+  it('preserves <artifact> blocks — only question-form is stripped, the deliverable stays intact', () => {
+    const original = [
+      'Build summary below.',
+      '',
+      '<artifact identifier="deck" type="text/html" title="Pitch deck">',
+      '<!doctype html>',
+      '<html><body>slide content</body></html>',
+      '</artifact>',
+    ].join('\n');
+    const sanitized = sanitizePriorAssistantTurnForTranscript(original);
+
+    expect(sanitized).toBe(original);
+    expect(sanitized).toContain('<artifact');
+    expect(sanitized).toContain('<!doctype html>');
+  });
+
+  it('sanitizes ONLY assistant content inside buildDaemonTranscript — user messages quoting <question-form> stay verbatim', () => {
+    const transcript = buildDaemonTranscript([
+      {
+        id: '1',
+        role: 'user',
+        // User legitimately quotes the markup in chat. Must not be mangled —
+        // they might be discussing the markup itself with the agent.
+        content: 'Why does <question-form id="discovery"> render as a card?',
+      },
+      {
+        id: '2',
+        role: 'assistant',
+        content: [
+          '<question-form id="discovery" title="Brief">',
+          '{ "questions": [] }',
+          '</question-form>',
+        ].join('\n'),
+      },
+    ]);
+
+    // User's <question-form> mention survives.
+    expect(transcript).toContain('Why does <question-form id="discovery"> render');
+    // Assistant's emission is replaced with the placeholder.
+    expect(transcript).toContain('question-form was emitted here on a prior turn');
+    expect(transcript).not.toContain('<question-form id="discovery" title="Brief">');
   });
 
   it('escapes role delimiter lines in prior message content', () => {
@@ -419,6 +589,133 @@ describe('streamViaDaemon', () => {
     expect(handlers.onDone).not.toHaveBeenCalled();
   });
 
+  it('renders structured OpenCode session errors without JSON-RPC wrapper text', async () => {
+    const handlers = createDaemonHandlers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn()
+        .mockResolvedValueOnce(jsonResponse({ runId: 'run-1' }))
+        .mockResolvedValueOnce(
+          sseResponse(
+            [
+              'event: error',
+              `data: ${JSON.stringify({
+                message: 'json-rpc id 4: OpenCode session failed: Not Found',
+                error: {
+                  code: 'AGENT_EXECUTION_FAILED',
+                  message: 'json-rpc id 4: OpenCode session failed: Not Found',
+                  details: {
+                    kind: 'opencode_session_error',
+                    source: 'opencode',
+                    message: 'Not Found',
+                    statusCode: 404,
+                    retryable: false,
+                    url: 'https://example.invalid/v1/chat/completions',
+                    suggestion: 'Check the configured AMR Link URL or model route.',
+                  },
+                },
+              })}`,
+              '',
+              '',
+            ].join('\n'),
+          ),
+        ),
+    );
+
+    await streamViaDaemon({
+      agentId: 'amr',
+      history: [{ id: '1', role: 'user', content: 'hello' }],
+      systemPrompt: '',
+      signal: new AbortController().signal,
+      handlers,
+    });
+
+    expect(handlers.onError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining('404 Not Found'),
+        code: 'AGENT_EXECUTION_FAILED',
+      }),
+    );
+    const message = (handlers.onError.mock.calls[0]?.[0] as Error).message;
+    expect(message).toContain('AMR Link URL or model route');
+    expect(message).not.toContain('json-rpc id 4');
+    expect(message).not.toContain('https://example.invalid');
+    expect(handlers.onDone).not.toHaveBeenCalled();
+  });
+
+  it('renders structured retry-exhausted provider errors from responseBodyPreview', async () => {
+    const handlers = createDaemonHandlers();
+    const responseBodyPreview = JSON.stringify({
+      error: {
+        message:
+          '[code=upstream_error] Provider returned error Retried the upstream request 5 times for retryable provider/network failures, but it still failed. Please try again later or switch to another model.',
+        type: 'upstream_error',
+        code: 'upstream_error',
+      },
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn()
+        .mockResolvedValueOnce(jsonResponse({ runId: 'run-1' }))
+        .mockResolvedValueOnce(
+          sseResponse(
+            [
+              'event: error',
+              `data: ${JSON.stringify({
+                message: 'json-rpc id 4: OpenCode session failed: upstream provider error',
+                error: {
+                  code: 'AGENT_EXECUTION_FAILED',
+                  message: 'json-rpc id 4: OpenCode session failed: upstream provider error',
+                  details: {
+                    kind: 'opencode_session_error',
+                    source: 'opencode',
+                    sessionId: 'ses_xxx',
+                    errorName: 'APIError',
+                    message: 'Provider returned error',
+                    statusCode: 503,
+                    retryable: true,
+                    url: 'https://amr-link.open-design.ai/v1/chat/completions',
+                    suggestion: 'Retry later or switch to another model.',
+                    responseBodyPreview,
+                  },
+                },
+              })}`,
+              '',
+              '',
+            ].join('\n'),
+          ),
+        ),
+    );
+
+    await streamViaDaemon({
+      agentId: 'amr',
+      history: [{ id: '1', role: 'user', content: 'hello' }],
+      systemPrompt: '',
+      signal: new AbortController().signal,
+      handlers,
+    });
+
+    expect(handlers.onError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'AGENT_EXECUTION_FAILED',
+        details: expect.objectContaining({
+          kind: 'opencode_session_error',
+          statusCode: 503,
+          retryable: true,
+        }),
+      }),
+    );
+    const message = (handlers.onError.mock.calls[0]?.[0] as Error).message;
+    expect(message).toContain('retried 5 times');
+    expect(message).toContain('still failed');
+    expect(message).toContain('retry later or switch to another model');
+    expect(message).not.toContain('opencode event stream');
+    expect(message).not.toContain('opencode session error');
+    expect(message).not.toContain('json-rpc id 4');
+    expect(message).not.toContain('https://amr-link.open-design.ai');
+  });
+
   it('treats an explicit succeeded status with a SIGTERM exit as a successful run', async () => {
     // ACP agents that don't shut down on stdin.end() (e.g. Devin for Terminal)
     // are SIGTERM'd by the daemon after a clean prompt completion. The end
@@ -454,6 +751,69 @@ describe('streamViaDaemon', () => {
     });
 
     expect(handlers.onDone).toHaveBeenCalledWith('ok');
+    expect(handlers.onError).not.toHaveBeenCalled();
+  });
+
+  it('finalizes streamed output when a run ends as canceled', async () => {
+    const handlers = createDaemonHandlers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn()
+        .mockResolvedValueOnce(jsonResponse({ runId: 'run-1' }))
+        .mockResolvedValueOnce(
+          sseResponse(
+            [
+              'event: stdout',
+              'data: {"chunk":"partial output"}',
+              '',
+              'event: end',
+              'data: {"code":null,"signal":"SIGTERM","status":"canceled"}',
+              '',
+              '',
+            ].join('\n'),
+          ),
+        ),
+    );
+
+    await streamViaDaemon({
+      agentId: 'mock',
+      history: [{ id: '1', role: 'user', content: 'hello' }],
+      systemPrompt: '',
+      signal: new AbortController().signal,
+      handlers,
+    });
+
+    expect(handlers.onDone).toHaveBeenCalledWith('partial output');
+    expect(handlers.onError).not.toHaveBeenCalled();
+  });
+
+  it('finalizes textless canceled runs so ProjectView can compute produced files', async () => {
+    const handlers = createDaemonHandlers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn()
+        .mockResolvedValueOnce(jsonResponse({ runId: 'run-1' }))
+        .mockResolvedValueOnce(
+          sseResponse(
+            [
+              'event: end',
+              'data: {"code":null,"signal":"SIGTERM","status":"canceled"}',
+              '',
+              '',
+            ].join('\n'),
+          ),
+        ),
+    );
+
+    await streamViaDaemon({
+      agentId: 'mock',
+      history: [{ id: '1', role: 'user', content: 'hello' }],
+      systemPrompt: '',
+      signal: new AbortController().signal,
+      handlers,
+    });
+
+    expect(handlers.onDone).toHaveBeenCalledWith('');
     expect(handlers.onError).not.toHaveBeenCalled();
   });
 
@@ -529,6 +889,175 @@ describe('streamViaDaemon', () => {
     expect(onRunStatus).toHaveBeenCalledWith('failed');
     expect(handlers.onError).not.toHaveBeenCalled();
     expect(handlers.onDone).toHaveBeenCalledWith('');
+  });
+
+  it('cleans AMR/OpenCode bootstrap stderr from fallback errors', async () => {
+    const handlers = createDaemonHandlers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn()
+        .mockResolvedValueOnce(jsonResponse({ runId: 'run-1' }))
+        .mockResolvedValueOnce(
+          sseResponse(
+            [
+              'event: stderr',
+              'data: {"chunk":"AMR run id: arun_7edd8e97efd5a5ffe5737280224ca8bd\\n"}',
+              '',
+              'event: stderr',
+              'data: {"chunk":"Performing one time database migration, may take a few minutes...\\n"}',
+              '',
+              'event: stderr',
+              'data: {"chunk":"sqlite-migration:done\\nDatabase migration complete.\\n"}',
+              '',
+              'event: stderr',
+              'data: {"chunk":"Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.\\n"}',
+              '',
+              'event: stderr',
+              'data: {"chunk":"opencode server listening on http://127.0.0.1:51954\\n"}',
+              '',
+              'event: end',
+              'data: {"code":1,"status":"failed"}',
+              '',
+              '',
+            ].join('\n'),
+          ),
+        ),
+    );
+
+    await streamViaDaemon({
+      agentId: 'amr',
+      history: [{ id: '1', role: 'user', content: 'hello' }],
+      systemPrompt: '',
+      signal: new AbortController().signal,
+      handlers,
+    });
+
+    expect(handlers.onError).toHaveBeenCalledWith(expect.any(Error));
+    const message = (handlers.onError.mock.calls[0]?.[0] as Error).message;
+    expect(message).toContain('AMR/OpenCode started, but the run did not complete');
+    expect(message).not.toContain('sqlite-migration');
+    expect(message).not.toContain('OPENCODE_SERVER_PASSWORD');
+    expect(message).not.toContain('opencode server listening');
+    expect(handlers.onDone).not.toHaveBeenCalled();
+  });
+
+  it('keeps real AMR/OpenCode stderr errors after removing bootstrap lines', async () => {
+    const handlers = createDaemonHandlers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn()
+        .mockResolvedValueOnce(jsonResponse({ runId: 'run-1' }))
+        .mockResolvedValueOnce(
+          sseResponse(
+            [
+              'event: stderr',
+              'data: {"chunk":"sqlite-migration:done\\nopencode server listening on http://127.0.0.1:51954\\n"}',
+              '',
+              'event: stderr',
+              'data: {"chunk":"json-rpc id 4: opencode event stream: provider disconnected\\n"}',
+              '',
+              'event: end',
+              'data: {"code":1,"status":"failed"}',
+              '',
+              '',
+            ].join('\n'),
+          ),
+        ),
+    );
+
+    await streamViaDaemon({
+      agentId: 'amr',
+      history: [{ id: '1', role: 'user', content: 'hello' }],
+      systemPrompt: '',
+      signal: new AbortController().signal,
+      handlers,
+    });
+
+    const message = (handlers.onError.mock.calls[0]?.[0] as Error).message;
+    expect(message).toContain('provider disconnected');
+    expect(message).not.toContain('sqlite-migration');
+    expect(message).not.toContain('opencode server listening');
+  });
+
+  it('formats legacy raw OpenCode session errors in fallback stderr', async () => {
+    const handlers = createDaemonHandlers();
+    const legacyError = {
+      sessionID: 'ses_1',
+      error: {
+        name: 'APIError',
+        data: {
+          message: 'Provider returned error',
+          statusCode: 503,
+          isRetryable: true,
+          metadata: { url: 'https://example.invalid/v1/chat/completions' },
+        },
+      },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn()
+        .mockResolvedValueOnce(jsonResponse({ runId: 'run-1' }))
+        .mockResolvedValueOnce(
+          sseResponse(
+            [
+              'event: stderr',
+              `data: ${JSON.stringify({ chunk: `json-rpc id 4: opencode event stream: opencode session error: ${JSON.stringify(legacyError)}\n` })}`,
+              '',
+              'event: end',
+              'data: {"code":1,"status":"failed"}',
+              '',
+              '',
+            ].join('\n'),
+          ),
+        ),
+    );
+
+    await streamViaDaemon({
+      agentId: 'amr',
+      history: [{ id: '1', role: 'user', content: 'hello' }],
+      systemPrompt: '',
+      signal: new AbortController().signal,
+      handlers,
+    });
+
+    const message = (handlers.onError.mock.calls[0]?.[0] as Error).message;
+    expect(message).toContain('upstream model provider returned a temporary error');
+    expect(message).toContain('retry');
+    expect(message).not.toContain('json-rpc id 4');
+  });
+
+  it('falls back gracefully for malformed legacy OpenCode session error JSON', async () => {
+    const handlers = createDaemonHandlers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn()
+        .mockResolvedValueOnce(jsonResponse({ runId: 'run-1' }))
+        .mockResolvedValueOnce(
+          sseResponse(
+            [
+              'event: stderr',
+              'data: {"chunk":"opencode event stream: opencode session error: {bad json\\n"}',
+              '',
+              'event: end',
+              'data: {"code":1,"status":"failed"}',
+              '',
+              '',
+            ].join('\n'),
+          ),
+        ),
+    );
+
+    await streamViaDaemon({
+      agentId: 'amr',
+      history: [{ id: '1', role: 'user', content: 'hello' }],
+      systemPrompt: '',
+      signal: new AbortController().signal,
+      handlers,
+    });
+
+    const message = (handlers.onError.mock.calls[0]?.[0] as Error).message;
+    expect(message).toContain('opencode session error');
+    expect(message).toContain('{bad json');
   });
 
   it('still surfaces an error when the end event has a signal but no status field', async () => {

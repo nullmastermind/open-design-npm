@@ -5,15 +5,21 @@ import { dirname, join, relative } from "node:path";
 import { hashJson, hashPath, ToolPackCache } from "./cache.js";
 import type { ToolPackConfig } from "./config.js";
 import { hashPackageSourcePath } from "./package-source-hash.js";
+import { readRuntimeAppVersion, versionFamilyForAppVersion } from "./versions.js";
 
 const WORKSPACE_BUILD_PACKAGES = [
+  { directory: "packages/components", name: "@open-design/components" },
   { directory: "packages/contracts", name: "@open-design/contracts" },
   { directory: "packages/registry-protocol", name: "@open-design/registry-protocol" },
   { directory: "packages/sidecar-proto", name: "@open-design/sidecar-proto" },
+  { directory: "packages/launcher-proto", name: "@open-design/launcher-proto" },
   { directory: "packages/sidecar", name: "@open-design/sidecar" },
   { directory: "packages/platform", name: "@open-design/platform" },
+  { directory: "packages/download", name: "@open-design/download" },
+  { directory: "packages/host", name: "@open-design/host" },
   { directory: "packages/agui-adapter", name: "@open-design/agui-adapter" },
   { directory: "packages/plugin-runtime", name: "@open-design/plugin-runtime" },
+  { directory: "packages/diagnostics", name: "@open-design/diagnostics" },
   { directory: "apps/daemon", name: "@open-design/daemon" },
   { directory: "apps/web", name: "@open-design/web" },
   { directory: "apps/desktop", name: "@open-design/desktop" },
@@ -21,13 +27,18 @@ const WORKSPACE_BUILD_PACKAGES = [
 ] as const;
 
 const BUILD_COMMANDS = [
+  { args: ["--filter", "@open-design/components", "build"] },
   { args: ["--filter", "@open-design/contracts", "build"] },
   { args: ["--filter", "@open-design/registry-protocol", "build"] },
   { args: ["--filter", "@open-design/sidecar-proto", "build"] },
+  { args: ["--filter", "@open-design/launcher-proto", "build"] },
   { args: ["--filter", "@open-design/sidecar", "build"] },
   { args: ["--filter", "@open-design/platform", "build"] },
+  { args: ["--filter", "@open-design/download", "build"] },
+  { args: ["--filter", "@open-design/host", "build"] },
   { args: ["--filter", "@open-design/agui-adapter", "build"] },
   { args: ["--filter", "@open-design/plugin-runtime", "build"] },
+  { args: ["--filter", "@open-design/diagnostics", "build"] },
   { args: ["--filter", "@open-design/daemon", "build"] },
   { args: ["--filter", "@open-design/web", "build"], env: ["OD_WEB_OUTPUT_MODE"] },
   { args: ["--filter", "@open-design/web", "build:sidecar"] },
@@ -42,8 +53,15 @@ type WorkspaceBuildMetadata = {
 
 type WorkspaceBuildArtifact = {
   cachePath: string;
+  requiredPathGroups: string[][];
   workspacePath: string;
 };
+
+async function resolveWorkspaceBuildVersionFamily(config: ToolPackConfig): Promise<string | null> {
+  if (config.platform !== "win") return null;
+  const appVersion = await readRuntimeAppVersion(config).catch(() => null);
+  return appVersion == null ? null : versionFamilyForAppVersion(appVersion);
+}
 
 async function pathExists(path: string): Promise<boolean> {
   try {
@@ -80,7 +98,7 @@ async function createWorkspaceBuildCacheKey(config: ToolPackConfig): Promise<str
     packageManager: await readPackageManager(config.workspaceRoot),
     platform: config.platform,
     pnpmLock: await hashPath(join(config.workspaceRoot, "pnpm-lock.yaml")),
-    schemaVersion: 5,
+    schemaVersion: 7,
     webOutputMode: config.webOutputMode,
   });
 }
@@ -91,20 +109,30 @@ function workspaceBuildOutputFiles(config: ToolPackConfig): string[] {
     "apps/web/.next/standalone/server.js",
   ];
   return [
+    "packages/components/dist/index.mjs",
+    "packages/components/dist/index.d.ts",
     "packages/contracts/dist/index.mjs",
     "packages/contracts/dist/index.d.ts",
     "packages/registry-protocol/dist/index.mjs",
     "packages/registry-protocol/dist/index.d.ts",
     "packages/sidecar-proto/dist/index.mjs",
     "packages/sidecar-proto/dist/index.d.ts",
+    "packages/launcher-proto/dist/index.mjs",
+    "packages/launcher-proto/dist/index.d.ts",
     "packages/sidecar/dist/index.mjs",
     "packages/sidecar/dist/index.d.ts",
     "packages/platform/dist/index.mjs",
     "packages/platform/dist/index.d.ts",
+    "packages/download/dist/index.mjs",
+    "packages/download/dist/index.d.ts",
+    "packages/host/dist/index.mjs",
+    "packages/host/dist/index.d.ts",
     "packages/agui-adapter/dist/index.mjs",
     "packages/agui-adapter/dist/index.d.ts",
     "packages/plugin-runtime/dist/index.mjs",
     "packages/plugin-runtime/dist/index.d.ts",
+    "packages/diagnostics/dist/index.mjs",
+    "packages/diagnostics/dist/index.d.ts",
     "apps/daemon/dist/cli.js",
     "apps/daemon/dist/cli.d.ts",
     "apps/daemon/dist/sidecar/index.js",
@@ -120,13 +148,18 @@ function workspaceBuildOutputFiles(config: ToolPackConfig): string[] {
 
 function workspaceBuildArtifacts(config: ToolPackConfig): WorkspaceBuildArtifact[] {
   const artifacts = [
+    "packages/components/dist",
     "packages/contracts/dist",
     "packages/registry-protocol/dist",
     "packages/sidecar-proto/dist",
+    "packages/launcher-proto/dist",
     "packages/sidecar/dist",
     "packages/platform/dist",
+    "packages/download/dist",
+    "packages/host/dist",
     "packages/agui-adapter/dist",
     "packages/plugin-runtime/dist",
+    "packages/diagnostics/dist",
     "apps/daemon/dist",
     "apps/web/dist",
     "apps/desktop/dist",
@@ -137,10 +170,20 @@ function workspaceBuildArtifacts(config: ToolPackConfig): WorkspaceBuildArtifact
   } else {
     artifacts.push("apps/web/.next/BUILD_ID");
   }
-  return artifacts.map((workspacePath) => ({
-    cachePath: join("outputs", ...workspacePath.split("/")),
-    workspacePath,
-  }));
+  const outputFiles = workspaceBuildOutputFiles(config);
+  return artifacts.map((workspacePath) => {
+    const requiredPathGroups = outputFiles.flatMap((output) => {
+      const candidates = output.split("|")
+        .filter((candidate) => candidate === workspacePath || candidate.startsWith(`${workspacePath}/`))
+        .map((candidate) => relative(workspacePath, candidate));
+      return candidates.length === 0 ? [] : [candidates];
+    });
+    return {
+      cachePath: join("outputs", ...workspacePath.split("/")),
+      requiredPathGroups,
+      workspacePath,
+    };
+  });
 }
 
 async function stripBrokenSymlinks(rootPath: string): Promise<void> {
@@ -255,11 +298,27 @@ export async function ensureWorkspaceBuildArtifacts(
   const key = await createWorkspaceBuildCacheKey(config);
   const nodeId = `${config.platform}.workspace-build`;
   const artifacts = workspaceBuildArtifacts(config);
+  const versionFamily = await resolveWorkspaceBuildVersionFamily(config);
+  const versionFamilyAlias = versionFamily == null
+    ? null
+    : hashJson({
+        node: nodeId,
+        nodeVersion: process.version,
+        platform: config.platform,
+        schemaVersion: 1,
+        scope: "version-family",
+        versionFamily,
+        webOutputMode: config.webOutputMode,
+      });
+  const materialize = artifacts.map((artifact) => ({
+    from: artifact.cachePath,
+    reuse: true,
+    reuseRequiredPaths: artifact.requiredPathGroups,
+    to: join(config.workspaceRoot, artifact.workspacePath),
+  }));
   await cache.acquire<WorkspaceBuildMetadata>({
-    materialize: artifacts.map((artifact) => ({
-      from: artifact.cachePath,
-      to: join(config.workspaceRoot, artifact.workspacePath),
-    })),
+    aliases: versionFamilyAlias == null ? [] : [versionFamilyAlias],
+    materialize,
     node: {
       id: nodeId,
       key,
@@ -291,5 +350,6 @@ export async function ensureWorkspaceBuildArtifacts(
         return { builtAt: new Date().toISOString(), outputFiles };
       },
     },
+    seedFrom: versionFamilyAlias == null ? [] : [{ aliasKey: versionFamilyAlias, materialize }],
   });
 }

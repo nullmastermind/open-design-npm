@@ -35,6 +35,7 @@ const SIBLINGS = new Map<string, { taskKind: string }>([
   ['od-default',          { taskKind: 'new-generation' }],
   ['od-media-generation', { taskKind: 'new-generation' }],
   ['od-plugin-authoring', { taskKind: 'new-generation' }],
+  ['od-share-to-community', { taskKind: 'new-generation' }],
   ['od-design-refine',    { taskKind: 'tune-collab' }],
   ['od-react-export',     { taskKind: 'tune-collab' }],
   ['od-nextjs-export',    { taskKind: 'tune-collab' }],
@@ -61,6 +62,10 @@ describe('plugins/_official/scenarios roster', () => {
       expect(manifest.od.taskKind).toBe(expected.taskKind);
       const stageIds = manifest.od.pipeline.stages.map((s: { id: string }) => s.id);
       expect(stageIds).toEqual(expected.pipelineStages);
+      if (folder === 'od-new-generation' || folder === 'od-tune-collab') {
+        const critiqueStage = manifest.od.pipeline.stages.find((s: { id: string }) => s.id === 'critique');
+        expect(critiqueStage?.atoms).toEqual(['critique-theater']);
+      }
     });
   }
 

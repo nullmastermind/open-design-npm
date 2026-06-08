@@ -1,6 +1,7 @@
 import { access, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os, { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import process from "node:process";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -13,6 +14,7 @@ import {
 } from "../src/mac/app.js";
 import { resolveSeededAppConfigPaths, seedPackagedAppConfig, writeLaunchPackagedConfig } from "../src/mac/index.js";
 import { resolveMacPaths } from "../src/mac/paths.js";
+import { ensureDaemonPlaywrightFixture } from "./playwright-fixture.js";
 
 async function pathExists(path: string): Promise<boolean> {
   try {
@@ -153,6 +155,7 @@ describe("seedPackagedAppConfig", () => {
 describe("copyResourceTree", () => {
   it("does not embed the build machine Node launcher into mac resources", async () => {
     const root = await mkdtemp(join(tmpdir(), "open-design-tools-pack-mac-"));
+    const playwrightFixture = await ensureDaemonPlaywrightFixture(process.cwd());
     try {
       const config = makeConfig(root);
       const paths = resolveMacPaths(config);
@@ -176,6 +179,7 @@ describe("copyResourceTree", () => {
 
       expect(await pathExists(join(paths.resourceRoot, "bin", "node"))).toBe(false);
     } finally {
+      await playwrightFixture.cleanup();
       await rm(root, { force: true, recursive: true });
     }
   });
@@ -245,9 +249,16 @@ describe("validateMacNativeRebuildOutput", () => {
       await mkdir(dirname(buildPath), { recursive: true });
       await writeFile(buildPath, "not a directory", "utf8");
 
-      await expect(validateMacNativeRebuildOutput(root)).resolves.toContain(
-        `native module output could not be inspected: ${nativePath}: ENOTDIR: not a directory, stat '${nativePath}'`,
-      );
+      const result = await validateMacNativeRebuildOutput(root);
+      if (process.platform === "win32") {
+        await expect(Promise.resolve(result)).resolves.toBe(
+          `native module output is missing: ${nativePath}`,
+        );
+      } else {
+        await expect(Promise.resolve(result)).resolves.toContain(
+          `native module output could not be inspected: ${nativePath}: ENOTDIR: not a directory, stat '${nativePath}'`,
+        );
+      }
     } finally {
       await rm(root, { force: true, recursive: true });
     }

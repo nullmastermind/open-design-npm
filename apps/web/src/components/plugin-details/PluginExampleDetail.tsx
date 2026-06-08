@@ -7,7 +7,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { InstalledPluginRecord } from '@open-design/contracts';
-import { useT } from '../../i18n';
+import { useI18n } from '../../i18n';
+import { localizePluginDescription, localizePluginTitle } from '../plugins-home/localization';
 import {
   fetchPluginExampleHtml,
   fetchPluginPreviewHtml,
@@ -33,7 +34,8 @@ export function PluginExampleDetail({
   onUse,
   isApplying,
 }: Props) {
-  const t = useT();
+  const { t, locale } = useI18n();
+  const localizedTitle = localizePluginTitle(locale, record);
   const [html, setHtml] = useState<string | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [unavailableKind, setUnavailableKind] = useState<string | null>(null);
@@ -82,12 +84,12 @@ export function PluginExampleDetail({
     void load();
   }, [load]);
 
-  const description = record.manifest?.description ?? '';
+  const description = localizePluginDescription(locale, record);
   const isDeck = record.manifest?.od?.mode === 'deck';
 
   return (
     <PreviewModal
-      title={record.title}
+      title={localizedTitle}
       subtitle={description || undefined}
       views={[
         {
@@ -95,14 +97,19 @@ export function PluginExampleDetail({
           label: t('examples.previewLabel'),
           html,
           error,
-          unavailable: unavailableKind ? { kind: unavailableKind } : null,
+          // Pass the surface-appropriate noun so the unavailable placeholder
+          // reads "this plugin" / "this template" instead of falling back to
+          // the legacy skills-only "this skill" copy. Issue #3216.
+          unavailable: unavailableKind
+            ? { kind: unavailableKind, noun: isDeck ? 'template' : 'plugin' }
+            : null,
           deck: isDeck,
         },
       ]}
       onView={onView}
-      exportTitleFor={() => record.title}
+      exportTitleFor={() => localizedTitle}
       shareTarget={{
-        title: record.title,
+        title: localizedTitle,
         description: description || undefined,
         url: buildPluginShareUrl(record),
       }}

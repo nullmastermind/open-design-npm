@@ -27,7 +27,7 @@ import {
 } from "@open-design/platform";
 
 import type { ToolPackConfig } from "./config.js";
-import { copyBundledResourceTrees, linuxResources } from "./resources.js";
+import { copyBundledPlaywrightChromium, copyBundledResourceTrees, linuxResources } from "./resources.js";
 import { copyOptionalVelaCliBinary } from "./vela-cli.js";
 import { electronBuilderVersionForAppVersion, readRuntimeAppVersion } from "./versions.js";
 import { processWebSourcemaps } from "./web-sourcemaps.js";
@@ -46,12 +46,16 @@ const CONTAINER_PNPM_HOME = "/tmp/pnpm-home";
 const CONTAINER_NODE_VERSION = "24.14.1";
 const CONTAINER_TOOLS_PACK_CLI_PATH = "tools/pack/bin/tools-pack.mjs";
 
-const INTERNAL_PACKAGES = [
+export const INTERNAL_PACKAGES = [
+  { directory: "packages/components", name: "@open-design/components" },
   { directory: "packages/contracts", name: "@open-design/contracts" },
   { directory: "packages/registry-protocol", name: "@open-design/registry-protocol" },
+  { directory: "packages/launcher-proto", name: "@open-design/launcher-proto" },
   { directory: "packages/sidecar-proto", name: "@open-design/sidecar-proto" },
   { directory: "packages/sidecar", name: "@open-design/sidecar" },
   { directory: "packages/platform", name: "@open-design/platform" },
+  { directory: "packages/download", name: "@open-design/download" },
+  { directory: "packages/host", name: "@open-design/host" },
   { directory: "packages/agui-adapter", name: "@open-design/agui-adapter" },
   { directory: "packages/plugin-runtime", name: "@open-design/plugin-runtime" },
   { directory: "packages/diagnostics", name: "@open-design/diagnostics" },
@@ -392,9 +396,14 @@ async function buildWorkspaceArtifacts(config: ToolPackConfig): Promise<void> {
   await runPnpm(config, ["--filter", "@open-design/sidecar-proto", "build"]);
   await runPnpm(config, ["--filter", "@open-design/sidecar", "build"]);
   await runPnpm(config, ["--filter", "@open-design/platform", "build"]);
+  await runPnpm(config, ["--filter", "@open-design/host", "build"]);
+  await runPnpm(config, ["--filter", "@open-design/download", "build"]);
   await runPnpm(config, ["--filter", "@open-design/agui-adapter", "build"]);
   await runPnpm(config, ["--filter", "@open-design/plugin-runtime", "build"]);
+  await runPnpm(config, ["--filter", "@open-design/download", "build"]);
+  await runPnpm(config, ["--filter", "@open-design/host", "build"]);
   await runPnpm(config, ["--filter", "@open-design/diagnostics", "build"]);
+  await runPnpm(config, ["--filter", "@open-design/components", "build"]);
   await runPnpm(config, ["--filter", "@open-design/daemon", "build"]);
   try {
     await runPnpm(config, ["--filter", "@open-design/web", "build"], { OD_WEB_OUTPUT_MODE: "server" });
@@ -446,6 +455,10 @@ async function copyResourceTree(config: ToolPackConfig, paths: LinuxPaths): Prom
   await rm(paths.resourceRoot, { force: true, recursive: true });
   await mkdir(paths.resourceRoot, { recursive: true });
   await copyBundledResourceTrees({
+    workspaceRoot: config.workspaceRoot,
+    resourceRoot: paths.resourceRoot,
+  });
+  await copyBundledPlaywrightChromium({
     workspaceRoot: config.workspaceRoot,
     resourceRoot: paths.resourceRoot,
   });
@@ -540,7 +553,9 @@ async function writeLinuxBuilderConfig(config: ToolPackConfig, paths: LinuxPaths
       buildResources: dirname(linuxResources.icon),
     },
     electronVersion: config.electronVersion.replace(/^[^\d]*/, ""),
-    electronDist: config.electronDistPath,
+    // See tools/pack/src/win/builder.ts: rely on electron-builder's own
+    // Electron download rather than node_modules' dist, which pnpm does not
+    // reliably materialize on CI runners.
     executableName: PRODUCT_NAME,
     extraMetadata: {
       main: "./main.cjs",
