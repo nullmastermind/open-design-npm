@@ -49,7 +49,8 @@ jobs:
           git add npm-package/package.json
           git commit -m "chore(npm-package): bump to v${{ steps.version.outputs.version }} [skip ci]"
           git tag "npm-v${{ steps.version.outputs.version }}"
-          git pull --rebase origin main
+          git fetch origin main
+          git rebase --autostash origin/main
           git push origin main --follow-tags
 
       - name: Publish to npm
