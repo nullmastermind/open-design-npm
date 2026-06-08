@@ -64,7 +64,7 @@ jobs:
           for f in .github/workflows/*; do
             basename="$(basename "$f")"
             if [ "$basename" != "publish-npm.yml" ] && [ "$basename" != "sync-fork.yml" ]; then
-              rm -f "$f"
+              rm -rf "$f"
               removed=true
             fi
           done
