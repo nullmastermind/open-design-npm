@@ -42,6 +42,7 @@ import {
 import type { PluginFolderAgentAction } from "./design-files/pluginFolderActions";
 import { Icon } from "./Icon";
 import { NextStepActions } from "./NextStepActions";
+import type { DesignToolboxActionId } from "../runtime/design-toolbox";
 import { copyToClipboard } from "../lib/copy-to-clipboard";
 import { useT } from "../i18n";
 import { deriveFileOps, type FileOpEntry } from "../runtime/file-ops";
@@ -61,6 +62,7 @@ import type {
   ChatMessageFeedbackRating,
   ChatMessageFeedbackReasonCode,
   ProjectFile,
+  SkillSummary,
 } from "../types";
 
 type TranslateFn = (
@@ -255,6 +257,11 @@ interface Props {
   // in-flight Write/Edit's code in real time before the full `tool_use`
   // arrives. Never persisted.
   liveToolInput?: Record<string, { name: string; text: string; seq?: number }>;
+  // ChatPane renders the canonical conversation-level TodoWrite card as its
+  // own row, while this message strips TodoWrite tool groups to avoid a
+  // duplicate per-message card.
+  showConversationTodoCard?: boolean;
+  conversationTodoInput?: unknown | null;
   projectId: string | null;
   // Analytics context for the assistant_feedback_* events. Defaults
   // applied at the call site keep AssistantMessage usable in tests
@@ -270,9 +277,9 @@ interface Props {
   ) => Promise<{ message?: string; url?: string } | void> | { message?: string; url?: string } | void;
   activePluginActionPaths?: Set<string>;
   hiddenPluginActionPaths?: Set<string>;
-  // Click handler for the "Share to Open Design" button rendered next to
-  // the post-completion Discord prompt. ProjectView wires this to
-  // handleSend with the bundled `od-share-to-community` trigger prompt.
+  // Click handler for the post-completion "Share to Open Design" submission
+  // action. ProjectView wires this to handleSend with the bundled
+  // `od-share-to-community` trigger prompt.
   onShareToOpenDesign?: () => void;
   shareToOpenDesignBusy?: boolean;
   // True only for the most recent assistant message.
@@ -298,11 +305,18 @@ interface Props {
   onFeedback?: (change: ChatMessageFeedbackChange) => void;
   suppressDirectionForms?: boolean;
   hasDesignSystemContext?: boolean;
-  // "Next step" affordance handlers, surfaced under the last assistant message
-  // once it has produced a previewable (HTML) artifact. Omitting them hides
-  // the affordance entirely (e.g. in tests that don't wire chat send).
+  // "Next step" affordance handlers, surfaced under the last successful
+  // assistant message. Omitting them hides the affordance entirely (e.g. in
+  // tests that don't wire chat send).
   onArtifactShare?: (fileName: string) => void;
-  onArtifactChip?: (fileName: string, prompt: string) => void;
+  // Featured design-toolbox follow-up rows on the "next step" card. Seeding the
+  // composer with an action / opening the full toolbox both route through the
+  // composer; see ChatPane's composer ref wiring.
+  onToolboxAction?: (id: DesignToolboxActionId) => void;
+  onPickSkill?: (skillId: string) => void;
+  onArtifactDownload?: (fileName: string) => void;
+  nextStepSkills?: SkillSummary[];
+  toolboxSkillNames?: Partial<Record<DesignToolboxActionId, string | null>>;
 }
 
 // Props compared by reference to decide whether a memoized AssistantMessage can
@@ -319,6 +333,8 @@ interface Props {
 const ASSISTANT_MESSAGE_COMPARED_PROPS: Array<keyof Props> = [
   'message',
   'streaming',
+  'showConversationTodoCard',
+  'conversationTodoInput',
   'projectId',
   'projectKind',
   'conversationId',
@@ -335,6 +351,11 @@ const ASSISTANT_MESSAGE_COMPARED_PROPS: Array<keyof Props> = [
   'shareToOpenDesignBusy',
   'suppressDirectionForms',
   'hasDesignSystemContext',
+  // Memoized + stable from ChatPane; compared so a late skill-list load
+  // refreshes the featured next-step rows' `@skill` hover detail and the full
+  // More → Design toolbox skill list.
+  'toolboxSkillNames',
+  'nextStepSkills',
   // Live streaming tool input changes identity on every `tool_input_delta`.
   // ChatPane passes it only to the streaming row (undefined elsewhere), so
   // comparing it re-renders just that row as the card grows — without it the
@@ -369,6 +390,8 @@ function AssistantMessageImpl({
   message,
   streaming,
   liveToolInput,
+  showConversationTodoCard = false,
+  conversationTodoInput = null,
   projectId,
   projectKind = null,
   conversationId = null,
@@ -392,7 +415,11 @@ function AssistantMessageImpl({
   suppressDirectionForms = false,
   hasDesignSystemContext = false,
   onArtifactShare,
-  onArtifactChip,
+  onToolboxAction,
+  onPickSkill,
+  onArtifactDownload,
+  nextStepSkills,
+  toolboxSkillNames,
 }: Props) {
   const t = useT();
   const events = message.events ?? [];
@@ -401,9 +428,9 @@ function AssistantMessageImpl({
   // shows the questions + options, so suppressing the trailing prose
   // avoids rendering the same content twice. The system prompt asks the
   // model not to do this; this is the belt-and-suspenders.
-  // The chat-pane-level PinnedTodoBar renders the canonical TodoWrite card
-  // above the composer, so we strip any TodoWrite tool-groups out of the
-  // per-message flow to avoid the same task list rendering twice.
+  // ChatPane renders the canonical TodoWrite card as a standalone chat row, so
+  // we strip TodoWrite tool-groups out of the per-message flow to avoid the
+  // same task list rendering twice.
   const settledUseIds = useMemo(
     () => new Set(events.filter((e) => e.kind === "tool_use").map((e) => e.id)),
     [events],
@@ -448,12 +475,16 @@ function AssistantMessageImpl({
           ];
         })()
       : [...buildBlocks(events), ...liveCodeBlocks];
-    return stripTodoToolGroups(
+    return placeConversationTodoCard(
       stripEmptyThinkingBlocks(
         suppressDuplicateQuestionForms(suppressAskUserQuestionFallbackText(rawBlocks)),
       ),
+      {
+        show: showConversationTodoCard,
+        input: conversationTodoInput,
+      },
     );
-  }, [events, liveAuq, liveCodeBlocks]);
+  }, [events, liveAuq, liveCodeBlocks, showConversationTodoCard, conversationTodoInput]);
   const fileOps = useMemo(() => deriveFileOps(events), [events]);
   const produced = message.producedFiles ?? [];
   const displayedProduced = useMemo(
@@ -469,12 +500,13 @@ function AssistantMessageImpl({
           }),
     [blocks, fileOps, message, produced, projectFiles, streaming],
   );
-  // The single artifact the "next step" affordance anchors to: prefer the
-  // first HTML produced file (decks/prototypes are HTML and are the ones the
-  // Share/Export menu + visual-polish loop apply to).
+  // The single artifact the "next step" affordance anchors to: prefer the HTML
+  // produced by THIS turn; if the final turn emitted none (a summary / continue
+  // message) fall back to the most recently modified HTML in the project so
+  // Share / Download still target the deliverable the user just made.
   const nextStepArtifactName = useMemo(
-    () => pickPreviewableArtifact(displayedProduced),
-    [displayedProduced],
+    () => pickPreviewableArtifact(displayedProduced) ?? pickLatestPreviewableArtifact(projectFiles),
+    [displayedProduced, projectFiles],
   );
   const pluginActionFolders = useMemo(
     () =>
@@ -579,6 +611,14 @@ function AssistantMessageImpl({
     hasEmptyResponse ||
     !!copyMarkdown ||
     canFork;
+  const canShowOpenDesignSubmission = !!onShareToOpenDesign && showFeedback && runSucceeded;
+  const showOpenDesignSubmission =
+    canShowOpenDesignSubmission && (!!isLast || shareToOpenDesignBusy);
+  const showNextStepActions =
+    !streaming &&
+    !!projectId &&
+    runSucceeded &&
+    ((!!isLast && !!onToolboxAction) || showOpenDesignSubmission);
   // Pre-output vs working: before any real content (text / thinking / tools /
   // files) the footer shimmers "Preparing…"; the moment content lands it
   // flips to "Working". The elapsed clock stays anchored to the persisted run
@@ -709,18 +749,6 @@ function AssistantMessageImpl({
             onRequestOpenFile={onRequestOpenFile}
           />
         ) : null}
-        {!streaming &&
-        isLast &&
-        projectId &&
-        nextStepArtifactName &&
-        onArtifactShare &&
-        onArtifactChip ? (
-          <NextStepActions
-            fileName={nextStepArtifactName}
-            onShare={onArtifactShare}
-            onChip={onArtifactChip}
-          />
-        ) : null}
         {!streaming && projectId && pluginActionFolders.length > 0 ? (
           <PluginActionPanel
             folders={pluginActionFolders}
@@ -806,29 +834,20 @@ function AssistantMessageImpl({
                 isLast={!!isLast}
               />
             )}
-            {/*
-              "Share to Open Design" — pairs with the post-feedback Discord
-              prompt (assistant-feedback-discord-note). Only shows on the most
-              recent assistant message after a successful run. The thumbs row
-              now also renders on failed/canceled turns, so Share keeps its own
-              `runSucceeded` gate to stay off errored runs, partial streams, or
-              empty responses. Click hands the user a packaged plugin via the
-              bundled od-share-to-community scenario.
-            */}
-            {onShareToOpenDesign && isLast && showFeedback && runSucceeded ? (
-              <button
-                type="button"
-                className="assistant-share-to-od-btn"
-                data-testid="assistant-share-to-od"
-                disabled={shareToOpenDesignBusy}
-                onClick={onShareToOpenDesign}
-              >
-                {shareToOpenDesignBusy
-                  ? t('assistant.shareToOpenDesignBusy')
-                  : t('assistant.shareToOpenDesign')}
-              </button>
-            ) : null}
           </div>
+        ) : null}
+        {showNextStepActions ? (
+          <NextStepActions
+            fileName={isLast ? nextStepArtifactName : null}
+            onShare={isLast && nextStepArtifactName ? onArtifactShare : undefined}
+            onToolboxAction={isLast ? onToolboxAction : undefined}
+            onPickSkill={isLast ? onPickSkill : undefined}
+            onDownload={isLast && nextStepArtifactName ? onArtifactDownload : undefined}
+            skills={isLast ? nextStepSkills : undefined}
+            toolboxSkillNames={isLast ? toolboxSkillNames : undefined}
+            onShareToOpenDesign={showOpenDesignSubmission ? onShareToOpenDesign : undefined}
+            shareToOpenDesignBusy={shareToOpenDesignBusy}
+          />
         ) : null}
       </div>
     </div>
@@ -839,11 +858,26 @@ function AssistantMessageImpl({
 // files, or null if this turn produced no shareable/polishable preview. Only
 // HTML files drive the preview workspace's Share/Export menu and the
 // visual-polish loop, so the "next step" affordance keys off them.
+function isPreviewableHtml(f: ProjectFile): boolean {
+  return f.kind === "html" || /\.html?$/i.test(f.name);
+}
+
 function pickPreviewableArtifact(files: ProjectFile[]): string | null {
-  const html = files.find(
-    (f) => f.kind === "html" || /\.html?$/i.test(f.name),
-  );
+  const html = files.find(isPreviewableHtml);
   return html ? html.name : null;
+}
+
+// Fallback for when the card-bearing turn produced no HTML itself: pick the
+// most recently modified HTML in the project (the deliverable the user just
+// made / is looking at) rather than whichever HTML happens to be first, which
+// would attach Share/Download to an arbitrary file in a multi-artifact project.
+function pickLatestPreviewableArtifact(files: ProjectFile[]): string | null {
+  let latest: ProjectFile | null = null;
+  for (const f of files) {
+    if (!isPreviewableHtml(f)) continue;
+    if (!latest || (f.mtime ?? 0) > (latest.mtime ?? 0)) latest = f;
+  }
+  return latest ? latest.name : null;
 }
 
 function inferProducedFilesFromTurn({
@@ -2030,22 +2064,37 @@ function ProseBlock({
 // Chat-side banner that points to the right-hand Questions tab where discovery
 // forms live. The chat column always stays compact: no inline form preview,
 // answered or not.
-function QuestionsBanner({ onOpen }: { onOpen?: () => void }) {
+function QuestionsBanner({
+  onOpen,
+  answered = false,
+}: {
+  onOpen?: () => void;
+  answered?: boolean;
+}) {
   const t = useT();
+  // Once the form has been answered there is nothing left to open, so the
+  // banner becomes a non-interactive "done" marker: no chevron affordance, no
+  // click target, muted styling.
   return (
     <button
       type="button"
-      className="questions-banner"
+      className={`questions-banner${answered ? " questions-banner-answered" : ""}`}
       data-testid="questions-banner"
-      onClick={() => onOpen?.()}
+      data-answered={answered ? "true" : undefined}
+      disabled={answered}
+      onClick={answered ? undefined : () => onOpen?.()}
     >
       <span className="questions-banner-icon" aria-hidden>
-        <Icon name="help-circle" size={15} />
+        <Icon name={answered ? "check" : "help-circle"} size={15} />
       </span>
-      <span className="questions-banner-label">{t("questions.banner")}</span>
-      <span className="questions-banner-cta" aria-hidden>
-        <Icon name="chevron-right" size={14} />
+      <span className="questions-banner-label">
+        {answered ? t("questions.bannerAnswered") : t("questions.banner")}
       </span>
+      {answered ? null : (
+        <span className="questions-banner-cta" aria-hidden>
+          <Icon name="chevron-right" size={14} />
+        </span>
+      )}
     </button>
   );
 }
@@ -2067,12 +2116,16 @@ function FormBlock({
   nextUserContent?: string;
   onOpenQuestions?: (request?: QuestionFormOpenRequest) => void;
 }) {
+  // A "[form answers …]" reply parked right after this message means the form
+  // was already submitted; the banner then renders as an answered/done state.
+  const submittedFromHistory = useMemo(
+    () => (nextUserContent ? parseSubmittedAnswers(form, nextUserContent) : null),
+    [form, nextUserContent],
+  );
   return (
     <QuestionsBanner
+      answered={submittedFromHistory != null}
       onOpen={() => {
-        const submittedFromHistory = nextUserContent
-          ? parseSubmittedAnswers(form, nextUserContent)
-          : null;
         onOpenQuestions?.({
           form,
           messageId: assistantMessageId,
@@ -2634,14 +2687,28 @@ type Block =
  * single tool-group block so the chat surface stays compact during chains
  * of edits / reads.
  */
-// Drop any tool-group composed entirely of TodoWrite calls. ChatPane
-// renders one canonical TodoCard above the composer using
-// `latestTodosFromConversation`, so leaving the same task list inline in
-// each assistant message just duplicates the view.
-function stripTodoToolGroups(blocks: Block[]): Block[] {
-  return blocks.filter((block) => {
-    if (block.kind !== "tool-group") return true;
-    return !block.items.every((it) => isTodoWriteToolName(it.use.name));
+function placeConversationTodoCard(
+  blocks: Block[],
+  options: { show: boolean; input: unknown | null },
+): Block[] {
+  let placed = false;
+  return blocks.flatMap((block): Block[] => {
+    if (block.kind !== "tool-group") return [block];
+    if (!block.items.every((it) => isTodoWriteToolName(it.use.name))) return [block];
+    if (!options.show || placed) return [];
+    placed = true;
+    const item = block.items[0];
+    if (!item || options.input == null) return [block];
+    return [{
+      ...block,
+      items: [{
+        ...item,
+        use: {
+          ...item.use,
+          input: options.input,
+        },
+      }],
+    }];
   });
 }
 

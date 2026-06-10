@@ -137,6 +137,18 @@ function storageRef(projectId: string, runId: string, objectClass: ObjectClass, 
 function inferRelayUrl(env: NodeJS.ProcessEnv): string | null {
   const explicit = env.OPEN_DESIGN_OBJECT_RELAY_URL?.trim();
   if (explicit) return explicit.replace(/\/+$/, '');
+  const rawTelemetryRelayUrl = env.OPEN_DESIGN_TELEMETRY_RELAY_URL?.trim();
+  if (!rawTelemetryRelayUrl) return null;
+  const telemetryRelayUrl = rawTelemetryRelayUrl.replace(/\/+$/, '');
+  try {
+    const url = new URL(telemetryRelayUrl);
+    if (!/\/api\/langfuse\/?$/u.test(url.pathname)) return null;
+    url.pathname = url.pathname.replace(/\/api\/langfuse\/?$/u, '/api/objects/batch');
+    return url.toString().replace(/\/+$/, '');
+  } catch {
+    const derived = telemetryRelayUrl.replace(/\/api\/langfuse\/?$/u, '/api/objects/batch');
+    return derived === telemetryRelayUrl ? null : derived.replace(/\/+$/, '');
+  }
   return null;
 }
 
@@ -650,7 +662,7 @@ export async function buildTraceObjectManifests(
       ...mergeSourceDigest(entry, sources[index]!),
       status: 'unavailable' as const,
       stored_in_open_design: false,
-      reason: entry.reason ?? 'relay_authorization_pending',
+      ...(entry.reason ? { reason: entry.reason } : {}),
     })));
   }
 
