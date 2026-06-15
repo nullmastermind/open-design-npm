@@ -5,6 +5,8 @@ import multer from 'multer';
 import JSZip from 'jszip';
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import dns from 'node:dns';
+import https from 'node:https';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -4572,7 +4574,6 @@ export function classifyChatRunCloseStatus(params: {
 
 type ClaudeStreamJsonBookkeepingRun = {
   stdinOpen?: boolean;
-  pendingHostAnswers?: Set<string>;
   turnCompletedCleanly?: boolean;
   child?: {
     stdin?: {
@@ -4599,30 +4600,18 @@ export function applyClaudeStreamJsonRunBookkeeping(
     stopReason?: unknown;
   };
 
-  if (
-    run.stdinOpen &&
-    event.type === 'tool_use' &&
-    (event.name === 'AskUserQuestion' || event.name === 'ask_user_question') &&
-    typeof event.id === 'string'
-  ) {
-    if (!run.pendingHostAnswers) run.pendingHostAnswers = new Set();
-    run.pendingHostAnswers.add(event.id);
-    return;
-  }
-
   const cleanTerminalTurn =
-    ((event.type === 'turn_end' &&
+    (event.type === 'turn_end' &&
       // `stop_reason: tool_use` means the model paused to wait for tool
-      // execution (claude-code is about to run an internal tool, or we owe a
-      // host tool_result). Either way the conversation is still in flight.
+      // execution (claude-code is about to run an internal tool). The
+      // conversation is still in flight.
       event.stopReason !== 'tool_use') ||
-      (event.type === 'usage' && event.stopReason !== 'tool_use')) &&
-    (!run.pendingHostAnswers || run.pendingHostAnswers.size === 0);
+    (event.type === 'usage' && event.stopReason !== 'tool_use');
   if (!cleanTerminalTurn) return;
 
-  // Record clean completion even if stdin was already closed by the
-  // host-answer path. The close-status classifier reads this to ignore late
-  // SessionEnd hook failures after the final assistant turn completed.
+  // Record clean completion even if stdin was already closed. The
+  // close-status classifier reads this to ignore late SessionEnd hook
+  // failures after the final assistant turn completed.
   run.turnCompletedCleanly = true;
   if (run.stdinOpen) {
     if (run.child?.stdin && !run.child.stdin.destroyed) {
@@ -4647,6 +4636,103 @@ function resolveAcpStageTimeoutMs(): number | undefined {
   const raw = Number(process.env.OD_ACP_STAGE_TIMEOUT_MS);
   if (!Number.isFinite(raw)) return undefined;
   return Math.min(MAX_CHAT_RUN_INACTIVITY_TIMEOUT_MS, Math.max(0, Math.floor(raw)));
+}
+
+type GeminiJsonEventStreamEvent = Record<string, unknown>;
+type BufferedStdoutChunk = { text: string; receivedAt: number };
+
+function parseGeminiJsonEventStreamEvents(text: string): GeminiJsonEventStreamEvent[] | null {
+  const lines = text
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return null;
+  const events: GeminiJsonEventStreamEvent[] = [];
+  for (const line of lines) {
+    try {
+      const obj = JSON.parse(line);
+      if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+      events.push(obj as GeminiJsonEventStreamEvent);
+    } catch {
+      return null;
+    }
+  }
+  return events;
+}
+
+function isGeminiJsonEventStream(events: GeminiJsonEventStreamEvent[] | null): boolean {
+  if (!events || events.length === 0) return false;
+  const [firstEvent] = events;
+  if (
+    !firstEvent ||
+    firstEvent.type !== 'init' ||
+    typeof firstEvent.session_id !== 'string' ||
+    firstEvent.session_id.length === 0 ||
+    typeof firstEvent.model !== 'string' ||
+    firstEvent.model.length === 0
+  ) {
+    return false;
+  }
+  return events.every((event) => {
+    const type = event?.type;
+    return (
+      type === 'init' ||
+      type === 'message' ||
+      type === 'tool_use' ||
+      type === 'tool_result' ||
+      type === 'error' ||
+      type === 'result'
+    );
+  });
+}
+
+function geminiJsonEventStreamHasVisibleAssistantText(
+  events: GeminiJsonEventStreamEvent[] | null,
+): boolean {
+  if (!events) return false;
+  return events.some((event) => (
+    event.type === 'message' &&
+    event.role === 'assistant' &&
+    typeof event.content === 'string' &&
+    event.content.length > 0
+  ));
+}
+
+export function bufferedAntigravityGeminiFirstTokenAt(
+  chunks: readonly BufferedStdoutChunk[],
+): number | null {
+  if (chunks.length === 0) return null;
+  const text = chunks.map((chunk) => chunk.text).join('');
+  const events = parseGeminiJsonEventStreamEvents(text);
+  if (!isGeminiJsonEventStream(events)) return null;
+  if (!geminiJsonEventStreamHasVisibleAssistantText(events)) return null;
+
+  let offset = 0;
+  for (const line of text.split(/(\r?\n)/u)) {
+    const nextOffset = offset + line.length;
+    if (line.length > 0 && line.trim().length > 0) {
+      try {
+        const event = JSON.parse(line) as GeminiJsonEventStreamEvent;
+        if (
+          event?.type === 'message' &&
+          event.role === 'assistant' &&
+          typeof event.content === 'string' &&
+          event.content.length > 0
+        ) {
+          let consumed = 0;
+          for (const chunk of chunks) {
+            consumed += chunk.text.length;
+            if (consumed >= nextOffset) return chunk.receivedAt;
+          }
+          return chunks.at(-1)?.receivedAt ?? null;
+        }
+      } catch {
+        return null;
+      }
+    }
+    offset = nextOffset;
+  }
+  return null;
 }
 
 export async function startServer({
@@ -6695,6 +6781,82 @@ export async function startServer({
     res.json({ ok: true });
   });
 
+  const AMR_API_PROXY_PREFIX = '/api/integrations/vela/api-proxy';
+  const AMR_API_UPSTREAM_ORIGIN = 'https://amr-api.open-design.ai';
+
+  function velaApiProxyBaseUrl(req) {
+    return `${getPublicBaseUrl(req)}${AMR_API_PROXY_PREFIX}`;
+  }
+
+  function velaProxyRequestBody(req) {
+    if (req.method === 'GET' || req.method === 'HEAD') return null;
+    if (Buffer.isBuffer(req.body)) return req.body;
+    if (typeof req.body === 'string') return Buffer.from(req.body);
+    if (req.body == null) return null;
+    return Buffer.from(JSON.stringify(req.body));
+  }
+
+  function shouldStreamVelaProxyRequest(req, body) {
+    return req.method !== 'GET' && req.method !== 'HEAD' && body == null;
+  }
+
+  function proxyAmrApiRequest(req, res) {
+    const suffix = req.originalUrl.slice(AMR_API_PROXY_PREFIX.length);
+    if (!suffix.startsWith('/api/v1/')) {
+      res.status(404).json({ error: 'unknown_amr_api_proxy_path' });
+      return;
+    }
+    const target = new URL(suffix, AMR_API_UPSTREAM_ORIGIN);
+    const body = velaProxyRequestBody(req);
+    const streamBody = shouldStreamVelaProxyRequest(req, body);
+    const headers = {};
+    for (const [key, value] of Object.entries(req.headers)) {
+      const lower = key.toLowerCase();
+      if (
+        lower === 'host' ||
+        lower === 'connection' ||
+        lower === 'transfer-encoding'
+      ) {
+        continue;
+      }
+      if (lower === 'content-length' && body) continue;
+      headers[key] = value;
+    }
+    if (body) headers['content-length'] = String(body.length);
+
+    const upstream = https.request(
+      target,
+      {
+        method: req.method,
+        headers,
+        lookup: (hostname, options, callback) => {
+          dns.lookup(hostname, { ...options, family: 4, all: false }, callback);
+        },
+      },
+      (upstreamRes) => {
+        res.status(upstreamRes.statusCode ?? 502);
+        for (const [key, value] of Object.entries(upstreamRes.headers)) {
+          if (value !== undefined) res.setHeader(key, value);
+        }
+        upstreamRes.pipe(res);
+      },
+    );
+    upstream.setTimeout(30_000, () => upstream.destroy(new Error('AMR API proxy timed out')));
+    upstream.on('error', (err) => {
+      if (!res.headersSent) {
+        res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
+      } else {
+        res.end();
+      }
+    });
+    if (body) upstream.write(body);
+    if (streamBody) {
+      req.pipe(upstream);
+    } else {
+      upstream.end();
+    }
+  }
+
   // AMR (vela) login integration — see `apps/daemon/src/integrations/vela.ts`.
   // The vela CLI owns the device-authorization UX (URL + code + browser open);
   // these routes only surface enough state for Open Design's Settings card to
@@ -6766,12 +6928,18 @@ export async function startServer({
     }
   });
 
+  app.all('/api/integrations/vela/api-proxy/*splat', proxyAmrApiRequest);
+
   app.post('/api/integrations/vela/login', async (req, res) => {
     try {
       const appConfig = await readAppConfig(RUNTIME_DATA_DIR);
       const configuredEnv = agentCliEnvForAgent(appConfig.agentCliEnv, 'amr');
       const attribution = parseVelaLoginAttribution(req.body);
-      const spawned = await spawnVelaLogin({ configuredEnv, attribution });
+      const spawned = await spawnVelaLogin({
+        configuredEnv,
+        attribution,
+        defaultApiUrl: velaApiProxyBaseUrl(req),
+      });
       res.status(202).json(spawned);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -13326,7 +13494,7 @@ export async function startServer({
     // time before deciding whether to forward it. The auth-prompt guard
     // in the close handler suppresses the buffer when the output is an
     // OAuth prompt; otherwise the flush below sends the chunks in order.
-    const plaintextStdoutBuffer: string[] = [];
+    const plaintextStdoutBuffer: BufferedStdoutChunk[] = [];
     // Arrival time of the first buffered plain-text stdout chunk
     // (antigravity). First-token timing is stamped from this value only
     // when the buffer is actually flushed to the client at close time. If
@@ -13341,6 +13509,9 @@ export async function startServer({
     // guard below skips them via `trackingSubstantiveOutput`.
     let agentProducedOutput = false;
     let trackingSubstantiveOutput = false;
+    const looksLikeGeminiJsonEventStream = (text: string) => (
+      isGeminiJsonEventStream(parseGeminiJsonEventStreamEvents(text))
+    );
     // Event types that count as "the agent actually produced something the
     // user can see." Lifecycle markers (`status`) and meter readings
     // (`usage`) deliberately do NOT count — a model can emit token-usage
@@ -13505,6 +13676,24 @@ export async function startServer({
       }
       send('agent', ev);
     };
+    const parseBufferedAntigravityGeminiJsonEventStream = () => {
+      if (
+        def.id !== 'antigravity' ||
+        plaintextStdoutBuffer.length === 0
+      ) {
+        return false;
+      }
+      const bufferedStdout = plaintextStdoutBuffer.map((chunk) => chunk.text).join('');
+      if (!looksLikeGeminiJsonEventStream(bufferedStdout)) return false;
+      trackingSubstantiveOutput = true;
+      const firstTokenAt = bufferedAntigravityGeminiFirstTokenAt(plaintextStdoutBuffer);
+      if (firstTokenAt !== null) noteFirstTokenAt(firstTokenAt);
+      const handler = createJsonEventStreamHandler('gemini', sendAgentEvent);
+      handler.feed(bufferedStdout);
+      handler.flush();
+      plaintextStdoutBuffer.length = 0;
+      return true;
+    };
 
     if (def.streamFormat === 'claude-stream-json') {
       const claude = createClaudeStreamHandler((ev) => {
@@ -13572,7 +13761,7 @@ export async function startServer({
         try {
           applyClaudeStreamJsonRunBookkeeping(run, ev);
         } catch {}
-      });
+      }, { suppressHtmlArtifactsAfterFileWrite: def.id === 'claude' });
       child.stdout.on('data', (chunk) => claude.feed(chunk));
       child.on('close', () => claude.flush());
     } else if (def.streamFormat === 'qoder-stream-json') {
@@ -13711,8 +13900,9 @@ export async function startServer({
       // suppressed OAuth-prompt path never reports a TTFT (PR #3412).
       child.stdout.on('data', (chunk) => {
         noteAgentActivity();
-        if (firstBufferedStdoutAt === null) firstBufferedStdoutAt = Date.now();
-        plaintextStdoutBuffer.push(String(chunk));
+        const receivedAt = Date.now();
+        if (firstBufferedStdoutAt === null) firstBufferedStdoutAt = receivedAt;
+        plaintextStdoutBuffer.push({ text: String(chunk), receivedAt });
       });
     } else {
       // Plain / BYOK mode: guard raw stdout chunks (#3247).
@@ -13773,6 +13963,7 @@ export async function startServer({
         markRpcCloseReason('fatal_rpc_error');
         return finishWithRetryDecision('failed', code ?? 1, signal ?? null);
       }
+      parseBufferedAntigravityGeminiJsonEventStream();
       if (agentStreamError) {
         markRpcCloseReason('stream_error');
         return finishWithRetryDecision('failed', code === 0 ? 1 : (code ?? 1), signal ?? null);
@@ -14090,7 +14281,7 @@ export async function startServer({
         noteFirstTokenAt(firstBufferedStdoutAt);
       }
       for (const chunk of plaintextStdoutBuffer) {
-        send('stdout', { chunk });
+        send('stdout', { chunk: chunk.text });
       }
       // Capture the pi session file path for conversational continuity.
       // The session path is discovered by attachPiRpcSession when it
