@@ -17,9 +17,10 @@
  * Run from repo root: node npm-package/scripts/build.mjs
  */
 import { execSync } from 'node:child_process';
-import { cpSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { cpSync, mkdirSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { builtinModules } from 'node:module';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageDir = join(__dirname, '..');
@@ -59,6 +60,35 @@ run('pnpm --filter @open-design/web build');
 // --- Step 3: Bundle daemon CLI ---
 console.log('\n=== Bundling daemon CLI ===');
 run(`node ${join(packageDir, 'esbuild.config.mjs')}`);
+
+// --- Step 3b: Verify externals are resolvable at runtime ---
+// Anything esbuild leaves `external` stays a runtime import in cli.js. If such a
+// module is neither a Node builtin nor a declared dependency, the published
+// bundle throws ERR_MODULE_NOT_FOUND on first import. Fail the build here
+// instead of shipping a broken package.
+console.log('\n=== Verifying externals are declared dependencies ===');
+const { EXTERNAL } = await import(
+  pathToFileURL(join(packageDir, 'esbuild.config.mjs')).href
+);
+const pkg = JSON.parse(
+  readFileSync(join(packageDir, 'package.json'), 'utf8'),
+);
+const declaredDeps = new Set(Object.keys(pkg.dependencies ?? {}));
+const builtins = new Set(builtinModules);
+const missing = EXTERNAL.filter((name) => {
+  const bare = name.startsWith('node:') ? name.slice('node:'.length) : name;
+  return !builtins.has(bare) && !declaredDeps.has(name);
+});
+if (missing.length > 0) {
+  console.error(
+    `\nERROR: esbuild external(s) not declared in npm-package/package.json dependencies: ${missing.join(', ')}`,
+  );
+  console.error(
+    'Each external must be a Node builtin or a runtime dependency, otherwise the published bundle throws ERR_MODULE_NOT_FOUND.',
+  );
+  process.exit(1);
+}
+console.log(`  OK: ${EXTERNAL.length} external(s) all resolvable`);
 
 // --- Step 4: Copy resources to match PROJECT_ROOT layout ---
 // The daemon resolves resources relative to PROJECT_ROOT:
