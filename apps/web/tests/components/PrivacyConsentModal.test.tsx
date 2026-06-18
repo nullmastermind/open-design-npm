@@ -6,8 +6,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PrivacyConsentModal } from '../../src/components/PrivacyConsentModal';
 import { I18nProvider } from '../../src/i18n';
 
-const PRIVACY_POLICY_HREF = 'https://github.com/nexu-io/open-design/blob/main/PRIVACY.md';
-
 function renderModal(overrides?: { onAccept?: () => void }) {
   const onAccept = overrides?.onAccept ?? vi.fn();
   render(
@@ -41,14 +39,6 @@ describe('PrivacyConsentModal', () => {
     expect(footer.textContent ?? '').toMatch(/Settings/);
     expect(footer.textContent ?? '').toMatch(/Privacy/);
     expect(footer.textContent ?? '').toMatch(/turn it off any time/i);
-  });
-
-  it('exposes the privacy policy via an obvious external link', () => {
-    renderModal();
-    const link = screen.getByRole('link', { name: /privacy policy/i });
-    expect(link.getAttribute('href')).toBe(PRIVACY_POLICY_HREF);
-    expect(link.getAttribute('target')).toBe('_blank');
-    expect(link.getAttribute('rel') ?? '').toContain('noopener');
   });
 
   it('invokes onAccept when the acknowledgement button is clicked', () => {

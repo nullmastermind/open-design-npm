@@ -4166,38 +4166,4 @@ describe('SettingsDialog about interactions', () => {
     fireEvent.click(document.querySelector('.modal-backdrop') as HTMLElement);
     expect(second.onClose).toHaveBeenCalledTimes(1);
   });
-
-  it('opens the releases page when the latest release info is stale', async () => {
-    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
-    fetchLatestGithubReleaseInfoMock.mockResolvedValue({
-      tagName: 'v0.4.1',
-      htmlUrl: 'https://github.com/nexu-io/open-design/releases/tag/v0.4.1',
-      stale: true,
-    });
-
-    renderSettingsDialog(
-      { mode: 'daemon', agentId: 'codex' },
-      {
-        initialSection: 'about',
-        appVersionInfo: {
-          version: '0.4.1',
-          channel: 'beta',
-          packaged: true,
-          platform: 'darwin',
-          arch: 'arm64',
-        },
-      },
-    );
-
-    fireEvent.click(screen.getByRole('button', { name: 'Install latest' }));
-
-    await waitFor(() => {
-      expect(openSpy).toHaveBeenCalledWith(
-        'https://github.com/nexu-io/open-design/releases',
-        '_blank',
-        'noopener,noreferrer',
-      );
-    });
-    expect(screen.queryByText(en['settings.alreadyLatest'])).toBeNull();
-  });
 });

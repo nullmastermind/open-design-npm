@@ -89,11 +89,6 @@ import { DesignSystemPreviewModal } from './DesignSystemPreviewModal';
 import { DesignSystemsTab } from './DesignSystemsTab';
 import { EntryNavRail, type EntryView as EntryViewKind } from './EntryNavRail';
 import { UpdaterPopup } from './UpdaterPopup';
-import { GithubStarBadge } from './GithubStarBadge';
-import {
-  formatDiscordPresenceCount,
-  useDiscordPresence,
-} from './useDiscordPresence';
 import { HomeView } from './HomeView';
 import {
   createPluginAuthoringHandoff,
@@ -172,8 +167,6 @@ function writeStoredRailOpen(open: boolean): void {
   }
 }
 
-const DISCORD_URL = 'https://discord.gg/mHAjSMV6gz';
-const X_URL = 'https://x.com/nexudotio';
 const ONBOARDING_DROPDOWN_OPEN_EVENT = 'open-design:onboarding-dropdown-open';
 
 // The topbar chips (GitHub star, model switcher, Use everywhere)
@@ -188,12 +181,8 @@ const ONBOARDING_DROPDOWN_OPEN_EVENT = 'open-design:onboarding-dropdown-open';
 // and `/api/runs` fallbacks resolve to the same plugin id when no
 // `pluginId` is on the request body — plan §3.3 of
 // `specs/current/plugin-driven-flow-plan.md`.
-// Newsletter signup endpoint. Lives on the marketing site (Cloudflare Pages
-// Function backed by KV), so this is a cross-origin POST from the desktop
-// client. Overridable at build time via NEXT_PUBLIC_NEWSLETTER_URL — e.g. point
-// it at a local `wrangler pages dev` instance during development.
-const NEWSLETTER_SUBSCRIBE_URL =
-  process.env.NEXT_PUBLIC_NEWSLETTER_URL ?? 'https://open-design.ai/subscribe';
+// Newsletter email validation. Signup itself is disabled in this build — the
+// Newsletter step's email field is inert and submits nothing to any endpoint.
 const NEWSLETTER_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ONBOARDING_BYOK_AUTO_FETCH_DELAY_MS = 300;
 const ONBOARDING_BYOK_AUTO_TEST_DELAY_MS = 500;
@@ -458,7 +447,6 @@ export function EntryShell({
   onCompleteOnboarding,
 }: Props) {
   const t = useT();
-  const discordPresence = useDiscordPresence();
   // Each entry sub-view (home / projects / design-systems) is its own
   // URL now, so the browser back/forward buttons work and a deep link
   // to /design-systems lands on that section. We derive the active
@@ -495,14 +483,6 @@ export function EntryShell({
   const [homePromptHandoff, setHomePromptHandoff] = useState<HomePromptHandoff | null>(null);
   const entryMainScrollRef = useRef<HTMLElement | null>(null);
   const analytics = useAnalytics();
-  const discordOnlineLabel = discordPresence
-    ? t('entry.discordOnlineLabel', {
-        count: formatDiscordPresenceCount(discordPresence.onlineCount),
-      })
-    : null;
-  const discordAriaLabel = discordOnlineLabel
-    ? t('entry.discordAriaWithOnline', { online: discordOnlineLabel })
-    : t('entry.discordAria');
   function changeView(next: EntryViewKind) {
     const navElement = navElementForView(next);
     if (navElement) {
@@ -737,28 +717,6 @@ export function EntryShell({
               <Icon name="panel-left" size={20} />
             </button>
             <div className="entry-main__topbar-chips entry-main__topbar-chips--icon-only">
-              <GithubStarBadge />
-              <a
-                className="entry-discord-badge od-tooltip"
-                href={DISCORD_URL}
-                aria-label={discordAriaLabel}
-                data-tooltip={discordAriaLabel}
-                data-tooltip-placement="bottom"
-                data-testid="entry-discord-badge"
-              >
-                <Icon name="discord" size={14} className="entry-discord-badge__icon" />
-                <span className="entry-discord-badge__label">{t('entry.discordLabel')}</span>
-                {discordOnlineLabel ? (
-                  <>
-                    <span className="entry-discord-badge__sep" aria-hidden>
-                      ·
-                    </span>
-                    <span className="entry-discord-badge__online">
-                      {discordOnlineLabel}
-                    </span>
-                  </>
-                ) : null}
-              </a>
               {executionSwitcher}
               <button
                 type="button"
@@ -1853,29 +1811,12 @@ function OnboardingView({
     });
   }
 
-  // Optional newsletter signup captured on the Newsletter step. The last-step
-  // button shows loading while this settles; failures are swallowed so
-  // onboarding completion never depends on the marketing site. A blank or
-  // malformed email is simply skipped. Only a boolean opt-in is tracked — the
-  // address itself is never sent to analytics.
-  async function submitNewsletterEmail(rawEmail: string): Promise<void> {
-    const email = rawEmail.trim().toLowerCase();
-    if (!email || !NEWSLETTER_EMAIL_RE.test(email)) return;
-    emitOnboardingClick('newsletter_email', 'subscribe', { newsletter_opt_in: true });
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 5000);
-    try {
-      await fetch(NEWSLETTER_SUBSCRIBE_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, source: 'client' }),
-        signal: controller.signal,
-      });
-    } catch {
-      // Swallow — onboarding completion must not depend on the marketing site.
-    } finally {
-      window.clearTimeout(timeout);
-    }
+  // Newsletter signup is disabled in this build: the email field on the
+  // Newsletter step is inert and nothing is sent to any external endpoint.
+  // The function is kept (and still called from the completion path) so the
+  // onboarding step structure and its finalizing-lock wiring stay unchanged.
+  async function submitNewsletterEmail(_rawEmail: string): Promise<void> {
+    // Intentionally a no-op: no outbound request, no opt-in tracking.
   }
 
   async function scanCliAgents(options: { preferExisting?: boolean } = {}) {

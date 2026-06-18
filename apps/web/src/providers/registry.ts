@@ -14,8 +14,6 @@ import type {
   ImportLocalDesignSystemRequest,
   ImportLocalDesignSystemResponse,
   ReplaceProjectWorkingDirResponse,
-  SocialShareRequest,
-  SocialShareResponse,
 } from '@open-design/contracts';
 import type {
   AgentInfo,
@@ -1372,24 +1370,6 @@ export async function checkDeploymentLink(
     throw new Error(payload?.error?.message || payload?.message || `Link check failed (${resp.status})`);
   }
   return (await resp.json()) as WebDeployProjectFileResponse;
-}
-
-export async function createSocialSharePayload(
-  input: SocialShareRequest,
-): Promise<SocialShareResponse> {
-  const resp = await fetch('/api/social-share', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(input),
-  });
-  if (!resp.ok) {
-    const payload = await resp.json().catch(() => null) as {
-      error?: { message?: string };
-      message?: string;
-    } | null;
-    throw new Error(payload?.error?.message || payload?.message || `Share payload failed (${resp.status})`);
-  }
-  return (await resp.json()) as SocialShareResponse;
 }
 
 // Project files — all paths are scoped under .od/projects/<id>/ on disk.

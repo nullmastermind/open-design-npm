@@ -3,12 +3,6 @@ import { createPortal, flushSync } from 'react-dom';
 import { Button, Input, Select } from '@open-design/components';
 import { APP_CHROME_FILE_ACTIONS_ID, APP_CHROME_FILE_ACTIONS_SELECTOR } from './AppChromeHeader';
 import {
-  buildSocialSharePayload,
-  OPEN_DESIGN_GITHUB_REPO_URL,
-  type SocialShareRequest,
-  type SocialShareResponse,
-} from '@open-design/contracts';
-import {
   anonymizeArtifactId,
   artifactKindToTracking,
   type TrackingProjectKind,
@@ -37,7 +31,6 @@ import {
   fetchLiveArtifactRefreshes,
   checkDeploymentLink,
   CLOUDFLARE_PAGES_PROVIDER_ID,
-  createSocialSharePayload,
   DEFAULT_DEPLOY_PROVIDER_ID,
   deployProjectFile,
   fetchCloudflarePagesZones,
@@ -105,7 +98,6 @@ import type {
 } from '../types';
 import { Icon } from './Icon';
 import { RemixIcon } from './RemixIcon';
-import { SocialShareGrid } from './SocialShareGrid';
 import { Toast } from './Toast';
 import { PreviewDrawOverlay, type DrawToolbarElement } from './PreviewDrawOverlay';
 import {
@@ -404,22 +396,6 @@ function deployResultState(status?: string): 'ready' | 'delayed' | 'protected' |
   if (status === 'failed' || status === 'conflict') return 'failed';
   if (status === 'link-delayed' || status === 'pending') return 'delayed';
   return 'ready';
-}
-
-function publicShareUrlForDeployment(deployment?: WebDeploymentInfo | null): string {
-  if (!deployment) return '';
-  const cloudflare = deployment.cloudflarePages;
-  const customDomainUrl = cloudflare?.customDomain?.status === 'ready'
-    ? cloudflare.customDomain.url?.trim()
-    : '';
-  if (customDomainUrl) return customDomainUrl;
-  const pagesDevUrl = cloudflare?.pagesDev?.status === 'ready'
-    ? cloudflare.pagesDev.url?.trim()
-    : '';
-  if (pagesDevUrl) return pagesDevUrl;
-  return deployResultState(deployment.status) === 'ready'
-    ? deployment.url?.trim() || ''
-    : '';
 }
 
 async function copyTextToClipboard(text: string): Promise<boolean> {
@@ -4652,10 +4628,8 @@ function HtmlViewer({
   const [deployment, setDeployment] = useState<WebDeploymentInfo | null>(null);
   const [deploymentsByProvider, setDeploymentsByProvider] = useState<Partial<Record<WebDeployProviderId, WebDeploymentInfo>>>({});
   const [deployModalOpen, setDeployModalOpen] = useState(false);
-  const [deployModalIntent, setDeployModalIntent] = useState<'deploy' | 'social-share'>('deploy');
   const closeDeployModal = useCallback(() => {
     setDeployModalOpen(false);
-    setDeployModalIntent('deploy');
   }, []);
   const [deployConfig, setDeployConfig] = useState<WebDeployConfigResponse | null>(null);
   const [deploying, setDeploying] = useState(false);
@@ -4665,7 +4639,6 @@ function HtmlViewer({
   const [deployResult, setDeployResult] = useState<WebDeployProjectFileResponse | null>(null);
   const [copiedDeployLink, setCopiedDeployLink] = useState<string | null>(null);
   const [deployProviderId, setDeployProviderId] = useState<WebDeployProviderId>(DEFAULT_DEPLOY_PROVIDER_ID);
-  const [projectSocialShare, setProjectSocialShare] = useState<SocialShareResponse | null>(null);
   const [deployToken, setDeployToken] = useState('');
   const [teamId, setTeamId] = useState('');
   const [teamSlug, setTeamSlug] = useState('');
@@ -6865,23 +6838,14 @@ function HtmlViewer({
 
   async function openDeployModal(
     nextProviderId: WebDeployProviderId = deployProviderId,
-    intent: 'deploy' | 'social-share' = 'deploy',
   ) {
     setDeployMenuOpen(false);
     setDeployModalOpen(true);
-    setDeployModalIntent(intent);
     setDeployError(null);
     setDeployActionToast(null);
     setCopiedDeployLink(null);
     setDeployPhase('idle');
     await loadDeployProvider(nextProviderId, { fallbackToExisting: true });
-  }
-
-  async function openSocialShareFlow() {
-    const providerWithDeployment = DEPLOY_PROVIDER_OPTIONS.find(
-      (option) => deploymentsByProvider[option.id]?.url?.trim(),
-    )?.id;
-    await openDeployModal(providerWithDeployment ?? deployProviderId, 'social-share');
   }
 
   async function changeDeployProvider(nextProviderId: WebDeployProviderId) {
@@ -7878,88 +7842,6 @@ function HtmlViewer({
       ? t('fileViewer.redeployToProvider', { provider: label })
       : t('fileViewer.deployToProvider', { provider: label });
   };
-  const deployedEntries = DEPLOY_PROVIDER_OPTIONS
-    .map((option) => deploymentsByProvider[option.id])
-    .filter((item): item is WebDeploymentInfo => Boolean(item?.url?.trim()));
-  const shareableDeploymentUrl =
-    DEPLOY_PROVIDER_OPTIONS.map((option) => deploymentsByProvider[option.id])
-      .map((item) => publicShareUrlForDeployment(item))
-      .find(Boolean) ?? '';
-  const socialShareBlockedDeployment =
-    shareableDeploymentUrl
-      ? null
-      : deployedEntries.find((item) => deployResultState(item.status) === 'protected' && !publicShareUrlForDeployment(item)) ??
-        deployedEntries.find((item) => !publicShareUrlForDeployment(item)) ??
-        null;
-  const socialShareBlockedState = socialShareBlockedDeployment
-    ? deployResultState(socialShareBlockedDeployment.status)
-    : null;
-  const socialShareDisplayUrl =
-    shareableDeploymentUrl || socialShareBlockedDeployment?.url?.trim() || activeDeployedUrl;
-  const socialShareUnavailableMessage =
-    socialShareBlockedState === 'protected'
-      ? t('fileViewer.deployLinkProtected')
-      : socialShareBlockedState === 'delayed'
-        ? t('fileViewer.deployLinkDelayed')
-        : t('socialShare.deployFirst');
-  const projectSocialShareRequest = useMemo<SocialShareRequest | null>(() => {
-    if (!socialShareDisplayUrl) return null;
-    const title = t('socialShare.projectTitle', { title: exportTitle });
-    const text = t('socialShare.projectText', {
-      title: exportTitle,
-      repo: OPEN_DESIGN_GITHUB_REPO_URL,
-    });
-    return {
-      kind: 'project-html',
-      locale,
-      url: socialShareDisplayUrl,
-      title,
-      text,
-      copyText: t('socialShare.projectCopyText', {
-        title: exportTitle,
-        url: socialShareDisplayUrl,
-        repo: OPEN_DESIGN_GITHUB_REPO_URL,
-      }),
-    };
-  }, [exportTitle, locale, socialShareDisplayUrl, t]);
-  const projectSocialShareFallback = useMemo(
-    () => (projectSocialShareRequest ? buildSocialSharePayload(projectSocialShareRequest) : null),
-    [projectSocialShareRequest],
-  );
-  // Gate the async payload load on a stable *content* key, not the memo's
-  // object identity. The request object can take a fresh identity on renders
-  // where its inputs are value-equal (e.g. while deployment polling re-sets
-  // state with a new map reference), and keying the effect on that identity
-  // made `setProjectSocialShare` re-fire every render — an infinite render
-  // loop once a deployment URL is available (#regression: ready-deploy share).
-  const projectSocialShareKey = projectSocialShareRequest
-    ? JSON.stringify(projectSocialShareRequest)
-    : '';
-  useEffect(() => {
-    setProjectSocialShare(null);
-    if (!projectSocialShareRequest) return;
-    let cancelled = false;
-    void createSocialSharePayload(projectSocialShareRequest)
-      .then((payload) => {
-        if (!cancelled) setProjectSocialShare(payload);
-      })
-      .catch(() => {
-        if (!cancelled) setProjectSocialShare(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectSocialShareKey]);
-  const activeProjectSocialShare = projectSocialShare ?? projectSocialShareFallback;
-  const socialShareMenuLabel =
-    activeProjectSocialShare
-      ? t('socialShare.projectSection')
-      : socialShareBlockedState === 'protected'
-        ? t('fileViewer.deployLinkProtectedLabel')
-        : socialShareBlockedState === 'delayed'
-        ? t('fileViewer.deployLinkPreparingLabel')
-          : t('socialShare.deployFirst');
   const deployActionIconFor = (providerId: WebDeployProviderId) => {
     if (providerId === 'cloudflare-pages') return 'pages-line';
     return 'upload-cloud-line';
@@ -7999,24 +7881,15 @@ function HtmlViewer({
         : t('fileViewer.copyShareLink');
   const shareMenuLabel = t('fileViewer.shareLabel');
   const deployMenuLabel = t('fileViewer.deployModalTitle') || 'Deploy';
-  const isSocialShareDeployModal = deployModalIntent === 'social-share';
-  const deployModalKicker = isSocialShareDeployModal
-    ? t('socialShare.projectSection')
-    : deployProviderLabel;
-  const deployModalTitle = isSocialShareDeployModal
-    ? t('socialShare.publishPageTitle')
-    : t('fileViewer.deployToProvider', { provider: deployProviderLabel });
-  const deployModalSubtitle = isSocialShareDeployModal
-    ? t('socialShare.publishPageSubtitle')
-    : t('fileViewer.deployModalSubtitle');
+  const deployModalKicker = deployProviderLabel;
+  const deployModalTitle = t('fileViewer.deployToProvider', { provider: deployProviderLabel });
+  const deployModalSubtitle = t('fileViewer.deployModalSubtitle');
   const deployButtonLabel =
     deployPhase === 'deploying'
       ? t('fileViewer.deployingToProvider', { provider: deployProviderLabel })
       : deployPhase === 'preparing-link'
         ? t('fileViewer.preparingPublicLink')
-        : isSocialShareDeployModal
-          ? t('socialShare.publishPageTitle')
-          : deployMenuLabel;
+        : deployMenuLabel;
   const copyDeployLabel = (url: string) =>
     copiedDeployLink === url.trim()
       ? t('fileViewer.copied')
@@ -8671,30 +8544,6 @@ function HtmlViewer({
                           <span>{deployActionLabelFor(option.id)}</span>
                         </button>
                       ))}
-                      <div className="share-menu-divider" />
-                      <div className="share-menu-section-label" role="presentation">
-                        {t('socialShare.projectSection')}
-                      </div>
-                      <button
-                        type="button"
-                        className="share-menu-item"
-                        role="menuitem"
-                        onClick={() => {
-                          setDeployMenuOpen(false);
-                          // Deploy-then-share also routes through the deploy
-                          // modal; the real publish is tracked by
-                          // artifact_deploy_result, not an export event.
-                          void openSocialShareFlow();
-                        }}
-                      >
-                        <span className="share-menu-icon">
-                          <RemixIcon
-                            name={activeProjectSocialShare ? 'share-forward-line' : 'upload-cloud-line'}
-                            size={15}
-                          />
-                        </span>
-                        <span>{socialShareMenuLabel}</span>
-                      </button>
                     </div>
                   ) : null}
                 </div>
@@ -9361,60 +9210,6 @@ function HtmlViewer({
                 <p className="subtitle">{deployModalSubtitle}</p>
               </div>
               <div className="deploy-form">
-                <div className={`deploy-social-share${activeProjectSocialShare ? '' : ' is-locked'}${socialShareBlockedState ? ` is-${socialShareBlockedState}` : ''}`}>
-                  <div className="deploy-social-share__head">
-                    <div className="deploy-social-share__label">
-                      {t('socialShare.projectSection')}
-                    </div>
-                    {socialShareDisplayUrl ? (
-                      <a
-                        className="deploy-social-share__url"
-                        href={socialShareDisplayUrl}
-                        target="_blank"
-                        rel="noreferrer noopener"
-                      >
-                        {socialShareDisplayUrl}
-                      </a>
-                    ) : null}
-                  </div>
-                  {!activeProjectSocialShare || socialShareBlockedState ? (
-                    <p className="hint">{socialShareUnavailableMessage}</p>
-                  ) : null}
-                  {activeProjectSocialShare ? (
-                    <SocialShareGrid
-                      share={activeProjectSocialShare}
-                      onAfterShare={closeDeployModal}
-                    />
-                  ) : null}
-                  {socialShareBlockedDeployment?.url ? (
-                    <div className="deploy-social-share__actions">
-                      <button
-                        type="button"
-                        className="viewer-action"
-                        onClick={() => {
-                          void copyDeployLink(socialShareBlockedDeployment.url);
-                        }}
-                      >
-                        <Icon name="copy" size={14} />
-                        <span>{copyDeployLabel(socialShareBlockedDeployment.url)}</span>
-                      </button>
-                      {activeDeployment?.id === socialShareBlockedDeployment.id ? (
-                        <button
-                          type="button"
-                          className="viewer-action"
-                          disabled={deployPhase === 'preparing-link'}
-                          onClick={() => {
-                            void retryDeploymentLink();
-                          }}
-                        >
-                          {deployPhase === 'preparing-link'
-                            ? t('fileViewer.preparingPublicLink')
-                            : t('fileViewer.retryLink')}
-                        </button>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </div>
               <label className="deploy-provider-field">
                 <span className="deploy-field-title">{t('fileViewer.deployProviderLabel')}</span>
                 <select

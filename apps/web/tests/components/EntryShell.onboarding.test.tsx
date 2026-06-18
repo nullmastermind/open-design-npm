@@ -249,33 +249,8 @@ beforeEach(() => {
 
 describe('EntryShell settings menu', () => {
   it('opens quick actions before opening the full settings dialog', async () => {
-    globalThis.fetch = vi.fn(async (input) => {
-      const url = typeof input === 'string' ? input : input instanceof Request ? input.url : String(input);
-      if (url.endsWith('/api/community/discord')) {
-        return jsonResponse({
-          inviteCode: 'mHAjSMV6gz',
-          inviteUrl: 'https://discord.gg/mHAjSMV6gz',
-          onlineCount: 1234,
-          memberCount: 4321,
-          fetchedAt: Date.now(),
-          stale: false,
-        });
-      }
-      if (url.endsWith('/api/github/open-design')) {
-        return jsonResponse({
-          repo: 'nexu-io/open-design',
-          stargazers_count: 56100,
-          fetchedAt: Date.now(),
-          stale: false,
-        });
-      }
-      return jsonResponse({});
-    }) as typeof fetch;
+    globalThis.fetch = vi.fn(async () => jsonResponse({})) as typeof fetch;
     const props = renderHome();
-
-    await waitFor(() => {
-      expect(screen.getByText('1.2k online')).toBeTruthy();
-    });
 
     fireEvent.click(screen.getByTestId('entry-settings-menu-trigger'));
 
@@ -283,9 +258,6 @@ describe('EntryShell settings menu', () => {
     expect(screen.getByTestId('entry-settings-menu')).toBeTruthy();
     expect(screen.getByText('Language')).toBeTruthy();
     expect(screen.getByText('Appearance')).toBeTruthy();
-    expect(screen.getByRole('menuitem', { name: /Join Discord/i })).toBeTruthy();
-    expect(screen.getByRole('menuitem', { name: /1.2k online/i })).toBeTruthy();
-    expect(screen.getByRole('menuitem', { name: /Follow @nexudotio on X/i })).toBeTruthy();
 
     fireEvent.click(screen.getByTestId('entry-settings-open-details'));
 
@@ -828,7 +800,7 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
     });
   });
 
-  it('submits the optional newsletter email when finishing the About-you step', async () => {
+  it('keeps the newsletter email field inert and sends nothing externally', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init;
       const url = String(input);
@@ -863,26 +835,20 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
 
     const emailInput = document.querySelector('.onboarding-view__email-input');
     expect(emailInput).toBeInstanceOf(HTMLInputElement);
-    expect((emailInput as HTMLInputElement).placeholder).toBe('you@studio.com');
 
     fireEvent.change(emailInput as HTMLInputElement, {
       target: { value: '  Tester@Studio.com  ' },
     });
     fireEvent.click(screen.getByRole('button', { name: /Finish setup/i }));
 
-    const subscribeCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/subscribe'));
-    expect(subscribeCall).toBeTruthy();
-    expect(JSON.parse(String(subscribeCall?.[1]?.body))).toEqual({
-      email: 'tester@studio.com',
-      source: 'client',
-    });
-
-    expect(findTrackedEvent('ui_click', (payload) => payload.element === 'newsletter_email')).toMatchObject({
-      page_name: 'onboarding',
-      element: 'newsletter_email',
-      action: 'subscribe',
-      newsletter_opt_in: true,
-    });
+    // Newsletter signup is disabled in this build: no outbound POST to any
+    // marketing endpoint, and no opt-in tracking event, even with a valid email.
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/subscribe'))).toBe(false);
+    expect(
+      trackedEvents('ui_click').some(
+        ([, payload]) => (payload as Record<string, unknown>).element === 'newsletter_email',
+      ),
+    ).toBe(false);
   });
 
   it('skips the newsletter request when the email field is left blank', async () => {

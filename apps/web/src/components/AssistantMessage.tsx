@@ -76,8 +76,6 @@ export type QuestionFormOpenRequest = {
   submittedAnswers?: Record<string, string | string[]>;
 };
 
-const DISCORD_INVITE_URL = "https://discord.gg/mHAjSMV6gz";
-
 interface ActionNotice {
   message: string;
   url?: string;
@@ -277,11 +275,6 @@ interface Props {
   ) => Promise<{ message?: string; url?: string } | void> | { message?: string; url?: string } | void;
   activePluginActionPaths?: Set<string>;
   hiddenPluginActionPaths?: Set<string>;
-  // Click handler for the post-completion "Share to Open Design" submission
-  // action. ProjectView wires this to handleSend with the bundled
-  // `od-share-to-community` trigger prompt.
-  onShareToOpenDesign?: () => void;
-  shareToOpenDesignBusy?: boolean;
   // True only for the most recent assistant message.
   isLast?: boolean;
   // Assistant message id whose run-failure error is rendered as ChatPane's
@@ -344,7 +337,6 @@ const ASSISTANT_MESSAGE_COMPARED_PROPS: Array<keyof Props> = [
   'errorCardOwnerId',
   'nextUserContent',
   'forking',
-  'shareToOpenDesignBusy',
   'suppressDirectionForms',
   'hasDesignSystemContext',
   // Memoized + stable from ChatPane; compared so a late skill-list load
@@ -397,8 +389,6 @@ function AssistantMessageImpl({
   onRequestPluginFolderAgentAction,
   activePluginActionPaths = new Set(),
   hiddenPluginActionPaths = new Set(),
-  onShareToOpenDesign,
-  shareToOpenDesignBusy = false,
   isLast,
   errorCardOwnerId = null,
   nextUserContent,
@@ -574,11 +564,8 @@ function AssistantMessageImpl({
     hasEmptyResponse ||
     !!copyMarkdown ||
     canFork;
-  const canShowOpenDesignSubmission = !!onShareToOpenDesign && showFeedback && runSucceeded;
-  const showOpenDesignSubmission =
-    canShowOpenDesignSubmission && (!!isLast || shareToOpenDesignBusy);
   // "Next step" only makes sense once there is a deliverable to act on. Anchor
-  // the whole card (toolbox cascade + Share + Contribute) on a previewable HTML
+  // the whole card (toolbox cascade + Share) on a previewable HTML
   // artifact — produced this turn or earlier in the project. A pure
   // clarifying-questions / summary turn that emitted no HTML must not surface
   // the card (issue: card appeared after a question-only turn with no artifact).
@@ -587,7 +574,8 @@ function AssistantMessageImpl({
     !!projectId &&
     runSucceeded &&
     !!nextStepArtifactName &&
-    ((!!isLast && !!onToolboxAction) || showOpenDesignSubmission);
+    !!isLast &&
+    !!onToolboxAction;
   // Pre-output vs working: before any real content (text / thinking / tools /
   // files) the footer shimmers "Preparing…"; the moment content lands it
   // flips to "Working". The elapsed clock stays anchored to the persisted run
@@ -797,8 +785,6 @@ function AssistantMessageImpl({
             onDownload={isLast && nextStepArtifactName ? onArtifactDownload : undefined}
             skills={isLast ? nextStepSkills : undefined}
             toolboxSkillNames={isLast ? toolboxSkillNames : undefined}
-            onShareToOpenDesign={showOpenDesignSubmission ? onShareToOpenDesign : undefined}
-            shareToOpenDesignBusy={shareToOpenDesignBusy}
           />
         ) : null}
       </div>
@@ -1488,25 +1474,11 @@ function AssistantFeedback({
           ) : null}
           {reasonRating === "positive" ? (
             <p className="assistant-feedback-discord-note">
-              Share what you made with the{" "}
-              <a
-                href={DISCORD_INVITE_URL}
-                data-testid="assistant-feedback-discord-positive"
-              >
-                Discord
-              </a>{" "}
-              community, or drop a screenshot and tell us what worked well.
+              Tell us what worked well, or drop a screenshot.
             </p>
           ) : (
             <p className="assistant-feedback-discord-note">
-              Share more context in{" "}
-              <a
-                href={DISCORD_INVITE_URL}
-                data-testid="assistant-feedback-discord-negative"
-              >
-                Discord
-              </a>{" "}
-              so the team can understand what went wrong and follow up directly.
+              Share more context so the team can understand what went wrong.
             </p>
           )}
           <div className="assistant-feedback-actions">

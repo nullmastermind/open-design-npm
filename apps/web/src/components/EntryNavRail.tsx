@@ -9,7 +9,6 @@
 // floating settings cog in the top-right corner of the main content.
 
 import { useEffect, useRef, type ReactNode } from 'react';
-import { EntryHelpMenu } from './EntryHelpMenu';
 import { Icon } from './Icon';
 import { useT } from '../i18n';
 
@@ -183,10 +182,6 @@ export function EntryNavRail({ view, onViewChange, onNewProject, open, onClose }
         >
           <Icon name="link" size={18} />
         </NavButton>
-      </div>
-      <div className="entry-nav-rail__footer">
-        <div className="entry-nav-rail__divider" role="separator" />
-        <EntryHelpMenu />
       </div>
     </nav>
   );

@@ -111,7 +111,6 @@ import { fetchProviderModels } from '../providers/provider-models';
 import {
   fetchConnectors,
   fetchDesignTemplates,
-  fetchLatestGithubReleaseInfo,
   openExternalUrl,
 } from '../providers/registry';
 import { MEDIA_PROVIDERS } from '../media/models';
@@ -119,7 +118,6 @@ import { useByokImageModelOptions, useByokVideoModelOptions, useByokSpeechModelO
 import { isVisualStabilityMode } from '../utils/visualStability';
 import { XaiOAuthControl } from './XaiOAuthControl';
 import type { MediaProvider } from '../media/models';
-import { Toast } from './Toast';
 import { PetSettings } from './pet/PetSettings';
 import { McpClientSection } from './McpClientSection';
 import { SkillsSection } from './SkillsSection';
@@ -1355,26 +1353,6 @@ export function SettingsDialog({
   const [agentCustomModelIds, setAgentCustomModelIds] = useState<
     ReadonlySet<string>
   >(() => new Set());
-  const [versionChecking, setVersionChecking] = useState(false);
-  const [aboutToast, setAboutToast] = useState<string | null>(null);
-
-  const handleInstallLatest = useCallback(async () => {
-    if (versionChecking || !appVersionInfo) return;
-    setVersionChecking(true);
-    try {
-      const release = await fetchLatestGithubReleaseInfo();
-      const latestTag = (release?.tagName ?? '').replace(/^v/, '');
-      if (release?.stale !== true && latestTag && latestTag === appVersionInfo.version) {
-        setAboutToast(t('settings.alreadyLatest'));
-        return;
-      }
-    } catch {
-      // network error — fall through to open releases page
-    } finally {
-      setVersionChecking(false);
-    }
-    window.open('https://github.com/nexu-io/open-design/releases', '_blank', 'noopener,noreferrer');
-  }, [versionChecking, appVersionInfo, t]);
 
   // Imperative handle for the External MCP section. The dialog footer Save
   // routes through this when the MCP tab is active so the user can press the
@@ -4687,14 +4665,6 @@ export function SettingsDialog({
                       <dt>{t('settings.appVersion')}</dt>
                       <span className="settings-about-version-num">{appVersionInfo.version}</span>
                     </div>
-                    <button
-                      type="button"
-                      className="settings-about-download-link"
-                      disabled={versionChecking}
-                      onClick={handleInstallLatest}
-                    >
-                      {versionChecking ? t('common.loading') : t('settings.installLatest')}
-                    </button>
                   </div>
                   <div>
                     <dt>{t('settings.appChannel')}</dt>
@@ -4728,12 +4698,6 @@ export function SettingsDialog({
                 <ExportDiagnosticsRow />
               </div>
             </section>
-          ) : null}
-          {aboutToast ? (
-            <Toast
-              message={aboutToast}
-              onDismiss={() => setAboutToast(null)}
-            />
           ) : null}
           </div>
         </div>
