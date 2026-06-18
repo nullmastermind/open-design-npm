@@ -1,9 +1,17 @@
-// Daemon-side helper that counts how many distinct `.html` files this
+// Daemon-side helper that counts how many distinct artifact files this
 // run produced or modified. Fed into v2 `run_finished.artifact_count`.
 //
-// Semantics (per product spec, 2026-05-21):
+// "Artifact" = a user-facing output file: HTML (prototypes / live artifacts /
+// slide decks all render from `.html`), plus generated media — images, video,
+// and audio — so media-kind projects no longer report a false zero. Supporting
+// assets an HTML run happens to write (e.g. `assets/*.png`) are also counted;
+// the metric's primary use is the boolean "did this run produce any artifact?"
+// funnel, where over-counting the exact number is harmless and under-counting
+// (the old HTML-only behaviour) was not.
+//
+// Semantics (per product spec, 2026-05-21; widened beyond HTML 2026-06-15):
 //   - Count is incremental for THIS run only, not cumulative across the
-//     project. If the run touched no `.html` files, the count is 0.
+//     project. If the run touched no artifact files, the count is 0.
 //   - A file written multiple times within the same run counts once
 //     (dedup by path) so a Write-then-Edit cycle on the same file
 //     reports one artifact, not two.
@@ -24,6 +32,9 @@
 // uniform zero on PostHog and made the same funnel useless from the
 // other direction.
 
+import type { TrackingRunResult } from '@open-design/contracts/analytics';
+import { emittedRenderableQuestionForm } from './question-form-detect.js';
+
 // Tool names cover Claude-style, Codex-style, and the ACP/MCP shapes
 // the daemon proxies. Keep aligned with the web-side `WRITE_NAMES` /
 // `EDIT_NAMES` sets in `apps/web/src/runtime/file-ops.ts`.
@@ -36,16 +47,6 @@ const WRITE_OR_EDIT_TOOL_NAMES: ReadonlySet<string> = new Set([
   'multi_edit',
 ]);
 
-// Tool names the daemon recognizes as an intent-clarification card. Claude
-// emits `AskUserQuestion`; the ACP/MCP snake_case proxy shape emits
-// `ask_user_question`. Keep aligned with the AskUserQuestion detection in
-// `apps/daemon/src/server.ts` and the card rendering in
-// `apps/web/src/components/ToolCard.tsx`.
-const ASK_USER_QUESTION_TOOL_NAMES: ReadonlySet<string> = new Set([
-  'AskUserQuestion',
-  'ask_user_question',
-]);
-
 function extractToolFilePath(input: unknown): string | null {
   if (!input || typeof input !== 'object') return null;
   const obj = input as { file_path?: unknown; path?: unknown };
@@ -54,8 +55,40 @@ function extractToolFilePath(input: unknown): string | null {
   return null;
 }
 
-function isHtmlPath(path: string): boolean {
-  return path.toLowerCase().endsWith('.html');
+// Artifact-output file extensions. HTML covers prototypes / live artifacts /
+// slide decks; the media sets mirror the canonical kind classifier in
+// `projects.ts` (`.image` / `.video` / `.audio` buckets) so the counter agrees
+// with how the rest of the app classifies generated files.
+const ARTIFACT_EXTENSIONS: ReadonlySet<string> = new Set([
+  '.html',
+  '.htm',
+  // image
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.avif',
+  // SVG renders as a user-facing artifact (`kindFor` buckets it as `sketch`,
+  // and the daemon / web artifact manifests treat `image/svg+xml` as a
+  // renderable output), so a run that writes only `logo.svg` must not report
+  // artifact_count: 0.
+  '.svg',
+  // video
+  '.mp4',
+  '.mov',
+  '.webm',
+  // audio
+  '.mp3',
+  '.wav',
+  '.m4a',
+]);
+
+function isArtifactPath(path: string): boolean {
+  const lower = path.toLowerCase();
+  const dot = lower.lastIndexOf('.');
+  if (dot < 0) return false;
+  return ARTIFACT_EXTENSIONS.has(lower.slice(dot));
 }
 
 function isDesignSystemFile(path: string): boolean {
@@ -103,7 +136,7 @@ function readToolResultIsError(data: unknown): boolean {
 // Generic write counter shared by all three predicates. Returns the
 // set of distinct paths the run successfully wrote / edited that
 // match `predicate`. Failure-pairing semantics match
-// `countNewHtmlArtifacts` so the three counters stay aligned.
+// `countNewArtifacts` so the counters stay aligned.
 function collectWrittenPathsMatching(
   events: readonly RunEventLike[],
   predicate: (path: string) => boolean,
@@ -152,81 +185,128 @@ export function didRunCreateDesignSystemFile(
 // Count of distinct preview modules the run wrote under `preview/`.
 // Fed into `run_finished.preview_module_count`. A run that wrote
 // `preview/index.html` only counts as 1 module preview (the
-// path-distinct semantics match countNewHtmlArtifacts).
+// path-distinct semantics match countNewArtifacts).
 export function countDesignSystemPreviewModules(
   events: readonly RunEventLike[],
 ): number {
   return collectWrittenPathsMatching(events, isPreviewModulePath).size;
 }
 
-export function countNewHtmlArtifacts(events: readonly RunEventLike[]): number {
-  if (!events || events.length === 0) return 0;
-
-  // First pass: collect tool_result records keyed by toolUseId so the
-  // second pass can resolve each tool_use's outcome without quadratic
-  // scanning. Default outcome for a tool_use with no matching result
-  // (run still streaming when this is called, or adapter swallowed
-  // the result) is "still in flight" — we treat that as NOT counting,
-  // since we can't confirm the artifact actually landed. The web-side
-  // `deriveFileOps` makes the same choice (status='running' for
-  // unmatched tool_use); aligning here keeps both pipelines in sync.
-  const resultByToolUseId = new Map<string, { isError: boolean }>();
-  for (const rec of events) {
-    if (rec?.event !== 'agent') continue;
-    const data = rec.data as { type?: string } | null | undefined;
-    if (data?.type !== 'tool_result') continue;
-    const id = readToolResultId(rec.data);
-    if (!id) continue;
-    resultByToolUseId.set(id, { isError: readToolResultIsError(rec.data) });
-  }
-
-  const writtenPaths = new Set<string>();
-  for (const rec of events) {
-    if (rec?.event !== 'agent') continue;
-    const data = rec.data as
-      | { type?: string; name?: unknown; input?: unknown }
-      | null
-      | undefined;
-    if (data?.type !== 'tool_use') continue;
-    if (typeof data.name !== 'string') continue;
-    if (!WRITE_OR_EDIT_TOOL_NAMES.has(data.name)) continue;
-    const path = extractToolFilePath(data.input);
-    if (!path) continue;
-    if (!isHtmlPath(path)) continue;
-    const toolUseId = readToolUseId(rec.data);
-    // No id: legacy / synthetic stream shapes that don't pair. Be
-    // conservative and skip; the dashboard would rather under-count
-    // than count attempts that may have failed silently.
-    if (!toolUseId) continue;
-    const outcome = resultByToolUseId.get(toolUseId);
-    // No matching result: tool still in flight at snapshot time, OR
-    // adapter never emitted one. Don't count either way.
-    if (!outcome) continue;
-    if (outcome.isError) continue;
-    writtenPaths.add(path);
-  }
-  return writtenPaths.size;
+// Count of distinct artifact files (HTML + image/video/audio) the run
+// successfully wrote or edited. Fed into `run_finished.artifact_count`.
+// Failure-pairing + path-dedup semantics come from the shared
+// `collectWrittenPathsMatching` helper (a tool_use whose tool_result reports
+// `isError` does not count; a file written then edited counts once).
+export function countNewArtifacts(events: readonly RunEventLike[]): number {
+  return collectWrittenPathsMatching(events, isArtifactPath).size;
 }
 
-// True iff the run raised an AskUserQuestion clarification card. Fed into
+// True iff the run raised an intent-clarification question. Fed into
 // `run_finished.asked_user_question`. A clarification turn is the agent
 // stopping to ask the user a finite-choice question; it inherently produces
 // no artifact, so the dashboard uses this flag to exclude such runs from the
 // "run finished -> has artifact" funnel rather than scoring them as
 // artifact-generation failures.
+//
+// Clarification now surfaces as a `<question-form>` artifact in the
+// assistant's streamed text (the AskUserQuestion tool was retired in favor of
+// the unified question-form flow; see `apps/web/src/artifacts/question-form.ts`
+// and the `awaiting_input` detection in `apps/daemon/src/db.ts`). Assistant
+// text arrives as `text_delta` chunks, so the marker can straddle a chunk
+// boundary — concatenate the run's text before testing for it.
+//
+// Two correctness points enforced here:
+//   1. Persisted `text_delta` events carry the chunk on `delta`
+//      (`{ type: 'text_delta'; delta }`, see packages/contracts/src/sse/chat.ts),
+//      NOT `text`. Reading `text` appended nothing for real runs, leaving the
+//      signal permanently false. We read `delta` first, and still accept a
+//      `text` field for any runtime that emits a whole-text event.
+//   2. We require a *renderable* closed `<question-form>`/`<ask-question>`
+//      block (shared `emittedRenderableQuestionForm`), not a raw open-tag
+//      match — so a run that merely shows the literal markup inside a generated
+//      doc, code sample, or HTML artifact is not misclassified as a
+//      clarification turn and wrongly excluded from the artifact funnel. The
+//      `<ask-question>` alias is covered by that shared matcher.
 export function runAskedUserQuestion(
   events: readonly RunEventLike[],
 ): boolean {
   if (!events || events.length === 0) return false;
+  let text = '';
   for (const rec of events) {
     if (rec?.event !== 'agent') continue;
     const data = rec.data as
-      | { type?: string; name?: unknown }
+      | { type?: unknown; text?: unknown; delta?: unknown }
       | null
       | undefined;
-    if (data?.type !== 'tool_use') continue;
-    if (typeof data.name !== 'string') continue;
-    if (ASK_USER_QUESTION_TOOL_NAMES.has(data.name)) return true;
+    if (!data) continue;
+    if (data.type !== 'text_delta' && data.type !== 'text') continue;
+    if (typeof data.delta === 'string') text += data.delta;
+    else if (typeof data.text === 'string') text += data.text;
   }
-  return false;
+  return emittedRenderableQuestionForm(text);
+}
+
+// First-touch activation milestones, written to the PostHog person record via
+// `$set_once` on `run_finished` (the authoritative daemon-side run-outcome
+// event that already carries `artifact_count` and `design_system_created`).
+// Two milestones the growth funnel needs to segment a user without replaying
+// their whole event history:
+//
+//   - `first_artifact_at`        — first run, observed since this stamp shipped,
+//                                  in which the user produced an artifact
+//   - `first_design_system_at`   — first run, observed since this stamp shipped,
+//                                  in which the user generated a design system
+//
+// IMPORTANT — "first observed since rollout", NOT "first ever". `$set_once`
+// only writes a key that does not already exist on the person, and this is the
+// only writer, so the timestamp is pinned to the user's first qualifying run
+// AFTER this code ships. For users who onboard after rollout that equals their
+// true first-ever milestone (and a faithful time-to-first-value signal). For
+// the pre-existing installed base it does NOT: a user who already produced an
+// artifact before rollout gets the timestamp of their next qualifying run
+// instead. There is no historical backfill in this path, so cohorts and
+// time-to-first-value built on these keys are only sound for post-rollout
+// users — segment older accounts by first-seen date before relying on them
+// (nettee review on PR #4362).
+//
+// The two are independent: a single design-system run that also emits HTML
+// artifacts legitimately crosses both at once.
+//
+// Only a SUCCESSFUL run counts — a failed/cancelled run that happened to touch
+// a file is not a milestone (mirrors the `artifact_count` funnel's "generation
+// success → artifact produced" framing).
+//
+// The design-system milestone must mirror the EXACT condition under which
+// `run_finished` emits `design_system_created`, which is gated on
+// `isDesignSystemRun` (server.ts only includes the field for DS runs). A plain
+// chat run can also write a `DESIGN.md` — `finalize-design.ts` lands one under
+// the project dir, and a user can edit an existing `DESIGN.md` from the chat
+// composer — so `designSystemCreated` alone (the raw "a DESIGN.md was written"
+// signal) would stamp `first_design_system_at` on runs whose `run_finished`
+// reports no `design_system_created`, drifting the person property away from
+// the metric and overstating DS activation. Gating on `isDesignSystemRun`
+// keeps the milestone and the event field in lockstep (nettee review on
+// PR #4362).
+//
+// Returns undefined when the run crossed no milestone so the caller omits the
+// `$set_once` key entirely rather than shipping an empty object.
+export function deriveActivationMilestones(args: {
+  result: TrackingRunResult;
+  artifactCount: number;
+  designSystemCreated: boolean;
+  // Whether this run is a design-system generation run. The DS milestone is
+  // gated on it so it tracks `run_finished.design_system_created` exactly.
+  isDesignSystemRun: boolean;
+  capturedAtIso: string;
+}): { first_artifact_at?: string; first_design_system_at?: string } | undefined {
+  if (args.result !== 'success') return undefined;
+  const milestones: {
+    first_artifact_at?: string;
+    first_design_system_at?: string;
+  } = {};
+  if (args.artifactCount > 0) milestones.first_artifact_at = args.capturedAtIso;
+  if (args.isDesignSystemRun && args.designSystemCreated) {
+    milestones.first_design_system_at = args.capturedAtIso;
+  }
+  return Object.keys(milestones).length > 0 ? milestones : undefined;
 }

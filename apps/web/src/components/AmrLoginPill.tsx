@@ -8,9 +8,16 @@ import {
 } from '../providers/daemon';
 import { useAnalytics } from '../analytics/provider';
 import {
+  amrHandoffDeviceId,
+  attributedAmrUrl,
   recordAmrEntry,
   type TrackingAmrEntrySource,
 } from '../analytics/amr-attribution';
+import { getResolvedDeviceId } from '../analytics/client';
+import {
+  beginAmrAuthTracking,
+  resolveAmrAuthTracking,
+} from '../analytics/amr-auth';
 import { useI18n } from '../i18n';
 import {
   AMR_LOGIN_STATUS_EVENT,
@@ -20,7 +27,7 @@ import {
   amrLoginStatusEventReason,
   notifyAmrLoginStatusChanged,
 } from './amrLoginPolling';
-import { AMR_CONSOLE_URL } from '../runtime/amr-guidance';
+import { amrConsoleUrlForProfile, amrProfileBadgeLabel } from '../runtime/amr-guidance';
 
 interface AmrLoginPillProps {
   className?: string;
@@ -30,6 +37,8 @@ interface AmrLoginPillProps {
   skipInitialRefresh?: boolean;
   signInLabel?: string;
   amrEntrySourceDetail?: TrackingAmrEntrySource;
+  metricsConsent?: boolean;
+  installationId?: string | null;
   revealPendingCancelAction?: boolean;
   showConsoleAction?: boolean;
   onStatusChange?: (status: VelaLoginStatus | null) => void;
@@ -66,6 +75,7 @@ export interface AmrAccountControlProps {
   onSignIn?: (event: MouseEvent<HTMLButtonElement>) => void;
   onSignOut?: (event: MouseEvent<HTMLButtonElement>) => void;
   onCancelSignIn?: (event: MouseEvent<HTMLButtonElement>) => void;
+  onConsoleClick?: (event: MouseEvent<HTMLAnchorElement>) => void;
   signInDisabled?: boolean;
   signOutDisabled?: boolean;
   cancelSignInDisabled?: boolean;
@@ -73,7 +83,7 @@ export interface AmrAccountControlProps {
 
 const AMR_CANCELED_RESET_MS = 1500;
 
-function closeAmrActivationWindowBestEffort(): boolean {
+export function closeAmrActivationWindowBestEffort(): boolean {
   if (typeof window === 'undefined') return false;
   if (window.opener == null) return false;
   try {
@@ -82,12 +92,6 @@ function closeAmrActivationWindowBestEffort(): boolean {
   } catch {
     return false;
   }
-}
-
-function profileBadgeLabel(profile: string | undefined): string | null {
-  if (profile === 'test') return 'TEST';
-  if (profile === 'local') return 'LOCAL';
-  return null;
 }
 
 function classNames(...names: Array<string | false | null | undefined>): string {
@@ -107,21 +111,24 @@ export function AmrAccountControl({
   hideSignedInStatus = false,
   signInLabel,
   showConsoleAction = false,
-  consoleUrl = AMR_CONSOLE_URL,
+  consoleUrl,
   showCancelSignInAction = false,
   onSignIn,
   onSignOut,
   onCancelSignIn,
+  onConsoleClick,
   signInDisabled = false,
   signOutDisabled = false,
   cancelSignInDisabled = false,
 }: AmrAccountControlProps) {
   const { t } = useI18n();
-  const badgeLabel = showProfileBadge ? profileBadgeLabel(profile) : null;
   const isSignedIn = status === 'signed-in';
   const isSigningIn = status === 'signing-in';
   const isCanceled = status === 'canceled';
   const hasError = status === 'error';
+  const badgeLabel = showProfileBadge ? amrProfileBadgeLabel(profile) : null;
+  const visibleBadgeLabel = isSignedIn ? badgeLabel : null;
+  const resolvedConsoleUrl = consoleUrl ?? amrConsoleUrlForProfile(profile);
   const loginErrorText = errorMessage || t('settings.amrLoginErrorCompact');
   const statusText = isSignedIn
     ? hideSignedInStatus
@@ -148,15 +155,21 @@ export function AmrAccountControl({
       aria-label={t('settings.amrAccountStatus')}
     >
       {statusText ? (
-        <span className="amr-account-control__status">{statusText}</span>
+        <span className="amr-account-control__status">
+          <span className="amr-account-control__status-text">{statusText}</span>
+          {visibleBadgeLabel ? (
+            <span className="amr-login-pill-badge">{visibleBadgeLabel}</span>
+          ) : null}
+        </span>
       ) : null}
       {isSignedIn && showConsoleAction ? (
         <a
           className="amr-account-control__action"
-          href={consoleUrl}
+          href={resolvedConsoleUrl}
           target="_blank"
           rel="noopener noreferrer"
           aria-label={t('settings.amrConsole')}
+          onClick={onConsoleClick}
         >
           {t('settings.amrConsole')}
         </a>
@@ -194,9 +207,6 @@ export function AmrAccountControl({
           {signInLabel ?? t('settings.amrSignIn')}
         </button>
       ) : null}
-      {badgeLabel ? (
-        <span className="amr-login-pill-badge">{badgeLabel}</span>
-      ) : null}
       {hasError ? (
         <span className="amr-account-control__error" role="alert">
           {loginErrorText}
@@ -217,6 +227,8 @@ export function AmrLoginPill({
   skipInitialRefresh = false,
   signInLabel,
   amrEntrySourceDetail,
+  metricsConsent = false,
+  installationId,
   revealPendingCancelAction = false,
   showConsoleAction = false,
   onStatusChange,
@@ -240,9 +252,12 @@ export function AmrLoginPill({
 
   const refresh = useCallback(async () => {
     const next = await fetchVelaLoginStatus();
-    if (next) setStatus(next);
+    if (next) {
+      setStatus(next);
+      onStatusChange?.(next);
+    }
     return next;
-  }, []);
+  }, [onStatusChange]);
 
   useEffect(() => {
     if (!skipInitialRefresh) void refresh();
@@ -289,6 +304,12 @@ export function AmrLoginPill({
       const next = await refresh();
       const outcome = amrLoginPollOutcome(next, startedAt);
       if (outcome === 'signed-in') {
+        resolveAmrAuthTracking(analytics.track, 'success', undefined, {
+          signedInUserId: next?.user?.id ?? null,
+        });
+        // Wake the app-level status sync so configure_type flips to 'amr'
+        // on the very next capture, not on an unrelated later refresh.
+        notifyAmrLoginStatusChanged();
         stopPolling();
         loginStartedAtRef.current = null;
         loginPendingRef.current = false;
@@ -298,9 +319,12 @@ export function AmrLoginPill({
       if (outcome === 'stopped' || outcome === 'timed-out') {
         stopPolling();
         if (outcome === 'timed-out') {
+          resolveAmrAuthTracking(analytics.track, 'timeout', 'login_timeout');
           void cancelVelaLogin().then(() =>
             notifyAmrLoginStatusChanged('login-canceled'),
           );
+        } else {
+          resolveAmrAuthTracking(analytics.track, 'failed', 'login_stopped');
         }
         loginStartedAtRef.current = null;
         loginPendingRef.current = false;
@@ -311,7 +335,7 @@ export function AmrLoginPill({
     pollRef.current = window.setInterval(() => {
       void tick();
     }, AMR_LOGIN_POLL_INTERVAL_MS);
-  }, [refresh, stopPolling, t]);
+  }, [analytics.track, refresh, stopPolling, t]);
 
   useEffect(() => {
     const onStatusChange = (event: Event) => {
@@ -388,11 +412,19 @@ export function AmrLoginPill({
       setPending('login');
       const attribution = amrEntrySourceDetail
         ? recordAmrEntry(analytics.track, amrEntrySourceDetail, new Date(), {
+            metricsConsent,
             reuseExistingFrom: AMR_LOGIN_REUSE_ENTRY_SOURCES,
           })
         : null;
-      const result = await startVelaLogin(attribution);
+      beginAmrAuthTracking(attribution, startedAt);
+      const odDeviceId = amrHandoffDeviceId({
+        metricsConsent,
+        resolvedDeviceId: getResolvedDeviceId(),
+        installationId,
+      });
+      const result = await startVelaLogin(attribution, odDeviceId);
       if (!result.ok && !result.alreadyRunning) {
+        resolveAmrAuthTracking(analytics.track, 'failed', 'spawn_failed');
         loginStartedAtRef.current = null;
         loginPendingRef.current = false;
         setPending(null);
@@ -402,12 +434,20 @@ export function AmrLoginPill({
       notifyAmrLoginStatusChanged('login-started');
       startPolling(startedAt);
     },
-    [amrEntrySourceDetail, analytics.track, startPolling, t],
+    [
+      amrEntrySourceDetail,
+      analytics.track,
+      installationId,
+      metricsConsent,
+      startPolling,
+      t,
+    ],
   );
 
   const handleCancelLogin = useCallback(
     async (event: MouseEvent<HTMLButtonElement>) => {
       event.stopPropagation();
+      resolveAmrAuthTracking(analytics.track, 'cancelled');
       stopPolling();
       setErrorMessage(null);
       setPending('cancel');
@@ -435,7 +475,7 @@ export function AmrLoginPill({
       setCanceledVisible(true);
       notifyAmrLoginStatusChanged('login-canceled');
     },
-    [stopPolling, t],
+    [analytics.track, stopPolling, t],
   );
 
   const handleLogout = useCallback(
@@ -455,6 +495,26 @@ export function AmrLoginPill({
       notifyAmrLoginStatusChanged('status-changed');
     },
     [refresh, t],
+  );
+
+  const handleConsoleClick = useCallback(
+    (event: MouseEvent<HTMLAnchorElement>) => {
+      event.stopPropagation();
+      const attribution = recordAmrEntry(analytics.track, 'settings_amr_console', new Date(), {
+        metricsConsent,
+      });
+      const deviceId = amrHandoffDeviceId({
+        metricsConsent,
+        resolvedDeviceId: getResolvedDeviceId(),
+        installationId,
+      });
+      event.currentTarget.href = attributedAmrUrl(
+        amrConsoleUrlForProfile(status?.profile),
+        attribution,
+        deviceId,
+      );
+    },
+    [analytics.track, installationId, metricsConsent, status?.profile],
   );
 
   const loggedIn = status?.loggedIn === true;
@@ -497,6 +557,7 @@ export function AmrLoginPill({
         onSignIn={handleLogin}
         onSignOut={handleLogout}
         onCancelSignIn={handleCancelLogin}
+        onConsoleClick={showConsoleAction ? handleConsoleClick : undefined}
         className={loggedIn ? 'amr-login-pill-status' : undefined}
       />
     </div>

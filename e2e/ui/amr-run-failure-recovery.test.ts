@@ -35,7 +35,7 @@ test.beforeAll(async () => {
   codexRuntime = runtimes.codex;
 });
 
-test('[P0] AMR insufficient-balance failures surface Top up AMR and keep Retry available', async ({ page }) => {
+test('[P0] @critical AMR insufficient-balance failures surface Top up AMR and keep Retry available', async ({ page }) => {
   const profile = `balance-${Date.now()}`;
   await page.route('**/api/integrations/vela/status', async (route) => {
     await route.fulfill({
@@ -83,10 +83,14 @@ test('[P0] AMR insufficient-balance failures surface Top up AMR and keep Retry a
         () => (window as Window & { __openedUrls?: string[] }).__openedUrls ?? [],
       ),
     )
-    .toContainEqual(expect.stringMatching(/^https:\/\/open-design\.ai\/amr\/wallet(?:\?|$)/));
+    .toContainEqual(
+      expect.stringMatching(
+        /^https:\/\/open-design\.ai\/amr\/wallet\?.*source=open_design.*od_origin=open_design.*od_entry_source=chat_error_recharge/,
+      ),
+    );
 });
 
-test('[P0] AMR auth failures offer Authorize & retry and open AMR authorization controls', async ({ page }) => {
+test('[P0] @critical AMR auth failures offer Authorize & retry and open AMR authorization controls', async ({ page }) => {
   let loggedIn = false;
   await page.route('**/api/integrations/vela/status', async (route) => {
     await route.fulfill({
@@ -153,7 +157,7 @@ test('[P0] after an AMR failure the user can switch to Codex and complete a fres
   await expect(page.getByRole('button', { name: /Authorize.*retry|授权并重试/i }).first()).toBeVisible();
 
   const settings = await openSettingsDialog(page);
-  await settings.getByRole('button', { name: /Codex CLI/i }).click();
+  await settings.getByTestId('settings-agent-select-codex').click();
   await expect
     .poll(async () => {
       const raw = await page.evaluate((key) => window.localStorage.getItem(key), STORAGE_KEY);

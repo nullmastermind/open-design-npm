@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { EntryShell } from '../../src/components/EntryShell';
 import { AMR_LOGIN_TIMEOUT_MS } from '../../src/components/amrLoginPolling';
+import { providerModelsCacheKey } from '../../src/components/providerModelsCache';
 import { I18nProvider } from '../../src/i18n';
 import type { AgentInfo, AppConfig } from '../../src/types';
 
@@ -78,7 +79,35 @@ function renderOnboarding(
   overrides: Partial<React.ComponentProps<typeof EntryShell>> = {},
 ) {
   window.history.replaceState(null, '', '/onboarding');
-  const props: React.ComponentProps<typeof EntryShell> = {
+  const props = onboardingProps(overrides);
+
+  function Harness() {
+    const [config, setConfig] = useState(props.config);
+    return (
+      <I18nProvider initial="en">
+        <EntryShell
+          {...props}
+          config={config}
+          onConfigPersist={(next) => {
+            props.onConfigPersist(next);
+            setConfig(next as AppConfig);
+          }}
+        />
+      </I18nProvider>
+    );
+  }
+
+  render(
+    <Harness />,
+  );
+
+  return props;
+}
+
+function onboardingProps(
+  overrides: Partial<React.ComponentProps<typeof EntryShell>> = {},
+): React.ComponentProps<typeof EntryShell> {
+  return {
     skills: [],
     designTemplates: [],
     designSystems: [],
@@ -112,28 +141,6 @@ function renderOnboarding(
     onCompleteOnboarding: vi.fn(),
     ...overrides,
   };
-
-  function Harness() {
-    const [config, setConfig] = useState(props.config);
-    return (
-      <I18nProvider initial="en">
-        <EntryShell
-          {...props}
-          config={config}
-          onConfigPersist={(next) => {
-            props.onConfigPersist(next);
-            setConfig(next as AppConfig);
-          }}
-        />
-      </I18nProvider>
-    );
-  }
-
-  render(
-    <Harness />,
-  );
-
-  return props;
 }
 
 function renderHome(
@@ -345,6 +352,117 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
     expect(localPanel?.textContent).not.toContain('AMR');
   });
 
+  it('reuses cached available CLI agents without refreshing and reports the preserved selection', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({ loggedIn: false, profile: 'prod', user: null, configPath: '/x' }),
+    ) as typeof fetch;
+    const refreshAgents = vi.fn(() => {
+      throw new Error('refresh should not run for cached agents');
+    });
+    const cursorAgent = cliAgent({
+      id: 'cursor-agent',
+      name: 'Cursor Agent',
+      bin: 'cursor-agent',
+    });
+    const props = renderOnboarding({
+      config: baseConfig({ agentId: 'cursor-agent' }),
+      agents: [
+        amrAgent(),
+        cliAgent({ id: 'codex', name: 'Codex CLI', bin: 'codex' }),
+        cursorAgent,
+      ],
+      onRefreshAgents: refreshAgents,
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /Local coding agent/i }));
+
+    await waitFor(() => {
+      expect(trackedEvents('onboarding_runtime_scan_result')).toHaveLength(1);
+    });
+    expect(refreshAgents).not.toHaveBeenCalled();
+    expect(props.onAgentChange).not.toHaveBeenCalledWith('codex');
+    expect(latestTrackedEvent('onboarding_runtime_scan_result')).toMatchObject({
+      result: 'success',
+      detected_cli_count: 3,
+      available_cli_count: 2,
+      selected_cli_id: 'cursor_agent',
+    });
+  });
+
+  it('resolves cached CLI reuse through the loading effect without duplicate scan telemetry', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({ loggedIn: false, profile: 'prod', user: null, configPath: '/x' }),
+    ) as typeof fetch;
+    const refreshAgents = vi.fn(() => {
+      throw new Error('refresh should not run while cached agents are still loading');
+    });
+    const props = onboardingProps({
+      agents: [amrAgent()],
+      agentsLoading: true,
+      onRefreshAgents: refreshAgents,
+    });
+    const view = render(
+      <I18nProvider initial="en">
+        <EntryShell {...props} />
+      </I18nProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Local coding agent/i }));
+    await act(async () => {});
+    expect(refreshAgents).not.toHaveBeenCalled();
+    expect(trackedEvents('onboarding_runtime_scan_result')).toHaveLength(0);
+
+    view.rerender(
+      <I18nProvider initial="en">
+        <EntryShell
+          {...props}
+          agents={[amrAgent(), cliAgent({ id: 'codex', name: 'Codex CLI', bin: 'codex' })]}
+          agentsLoading={false}
+        />
+      </I18nProvider>,
+    );
+
+    await waitFor(() => {
+      expect(trackedEvents('onboarding_runtime_scan_result')).toHaveLength(1);
+    });
+    expect(refreshAgents).not.toHaveBeenCalled();
+    expect(latestTrackedEvent('onboarding_runtime_scan_result')).toMatchObject({
+      result: 'success',
+      detected_cli_count: 2,
+      available_cli_count: 1,
+      selected_cli_id: 'codex_cli',
+    });
+  });
+
+  it('refreshes exactly once when the cached CLI list is empty', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({ loggedIn: false, profile: 'prod', user: null, configPath: '/x' }),
+    ) as typeof fetch;
+    const refreshAgents = vi.fn(() => [
+      amrAgent(),
+      cliAgent({ id: 'codex', name: 'Codex CLI', bin: 'codex' }),
+    ]);
+    renderOnboarding({
+      agents: [amrAgent()],
+      agentsLoading: false,
+      onRefreshAgents: refreshAgents,
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /Local coding agent/i }));
+    await act(async () => {});
+
+    await waitFor(() => {
+      expect(trackedEvents('onboarding_runtime_scan_result')).toHaveLength(1);
+    });
+    expect(refreshAgents).toHaveBeenCalledTimes(1);
+    expect(latestTrackedEvent('onboarding_runtime_scan_result')).toMatchObject({
+      result: 'success',
+      detected_cli_count: 2,
+      available_cli_count: 1,
+      selected_cli_id: 'codex_cli',
+    });
+  });
+
   it('keeps AMR login pending while device authorization is waiting', async () => {
     const fetchMock = vi.fn(async (input, init) => {
       const url = String(input);
@@ -442,7 +560,34 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
     await act(async () => {});
 
     expect(screen.queryByText('Signing in…')).toBeNull();
-    expect(screen.getByRole('button', { name: /^Continue$/i }).hasAttribute('disabled')).toBe(false);
+    // Switching to the Local runtime clears the AMR login-pending state. The
+    // Connect gate then keeps Continue gated (aria-disabled) until a usable
+    // local CLI is actually selected — here onAgentChange is mocked and never
+    // commits a selection, so no runtime is ready and Continue stays gated.
+    expect(
+      screen.getByRole('button', { name: /^Continue$/i }).getAttribute('aria-disabled'),
+    ).toBe('true');
+  });
+
+  it('surfaces a runtime-specific gate tooltip on the primary CTA', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({ loggedIn: false, profile: 'prod', user: null, configPath: '/x' }),
+    ) as typeof fetch;
+    renderOnboarding();
+
+    // AMR selected but signed out: the CTA is "Sign in to continue" and carries
+    // the AMR gate tooltip. It stays clickable (starts login), so not aria-disabled.
+    const signIn = await screen.findByRole('button', { name: /Sign in to continue/i });
+    expect(signIn.getAttribute('data-tooltip')).toMatch(/Open Design AMR/i);
+    expect(signIn.getAttribute('aria-disabled')).not.toBe('true');
+
+    // Switch to Local with no committed agent: Continue is gated (aria-disabled)
+    // and the tooltip points the user at selecting a local CLI.
+    fireEvent.click(screen.getByRole('button', { name: /Local coding agent/i }));
+    await act(async () => {});
+    const cont = screen.getByRole('button', { name: /^Continue$/i });
+    expect(cont.getAttribute('aria-disabled')).toBe('true');
+    expect(cont.getAttribute('data-tooltip')).toMatch(/local CLI/i);
   });
 
   it('cancels AMR login and re-enables onboarding after the login timeout', async () => {
@@ -620,12 +765,13 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
     chooseDropdownOption('Organization size', /Growth company/i);
     chooseDropdownOption('Use case', /Product design/i);
     chooseDropdownOption('Where did you hear about us?', /Search/i);
-    // About you is no longer the last step — advance to the newsletter step.
     fireEvent.click(screen.getByRole('button', { name: /^Continue$/i }));
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Stay in the loop' })).toBeTruthy();
+    });
     await waitFor(() => {
       expect(document.querySelector('.onboarding-view__email-input')).toBeTruthy();
     });
-    // Finish from the newsletter step.
     fireEvent.click(screen.getByRole('button', { name: /Finish setup/i }));
 
     expect(props.onCompleteOnboarding).toHaveBeenCalledTimes(1);
@@ -654,13 +800,11 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
       ]),
     );
 
-    // The About-you survey snapshot now fires on Finish from the newsletter
-    // step (the new last step), so it carries area: 'newsletter'. The payload
-    // — the user's role/org/use-case/source picks — is what matters and is
-    // still intact.
+    // The About-you survey snapshot fires when the user continues past
+    // the About-you step and carries the role/org/use-case/source picks.
     expect(findTrackedEvent('ui_click', (payload) => payload.element === 'about_you_submit')).toMatchObject({
       page_name: 'onboarding',
-      area: 'newsletter',
+      area: 'about_you',
       element: 'about_you_submit',
       action: 'continue',
       role: 'engineer',
@@ -704,13 +848,15 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
     globalThis.fetch = fetchMock as typeof fetch;
     renderOnboarding();
 
-    // Connect -> About you
+    // Connect -> About you -> Newsletter
     fireEvent.click(await screen.findByRole('button', { name: /^Continue$/i }));
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'About you' })).toBeTruthy();
     });
-    // About you -> newsletter step (where the email field now lives)
     fireEvent.click(screen.getByRole('button', { name: /^Continue$/i }));
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Stay in the loop' })).toBeTruthy();
+    });
     await waitFor(() => {
       expect(document.querySelector('.onboarding-view__email-input')).toBeTruthy();
     });
@@ -759,7 +905,6 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'About you' })).toBeTruthy();
     });
-    // Advance to the newsletter step, then finish without typing an email.
     fireEvent.click(screen.getByRole('button', { name: /^Continue$/i }));
     await waitFor(() => {
       expect(document.querySelector('.onboarding-view__email-input')).toBeTruthy();
@@ -767,6 +912,81 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
     fireEvent.click(screen.getByRole('button', { name: /Finish setup/i }));
 
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/subscribe'))).toBe(false);
+  });
+
+  it('reports about_you_submit exactly once when advancing to the newsletter step', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({
+        loggedIn: true,
+        profile: 'prod',
+        configPath: '/x',
+        user: { id: 'u', email: 'user@example.com' },
+      }),
+    ) as typeof fetch;
+    renderOnboarding();
+
+    fireEvent.click(await screen.findByRole('button', { name: /^Continue$/i }));
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'About you' })).toBeTruthy();
+    });
+    chooseDropdownOption('Your role', 'Engineer');
+
+    // Advance to the newsletter step via Continue (the stepper no longer
+    // allows forward jumps past the current step). The survey snapshot must
+    // still fire exactly once — on the final Finish — not zero times.
+    fireEvent.click(screen.getByRole('button', { name: /^Continue$/i }));
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Stay in the loop' })).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Finish setup/i }));
+
+    const aboutYouSubmits = trackedEvents('ui_click')
+      .map(([, payload]) => payload as Record<string, unknown>)
+      .filter((payload) => payload.element === 'about_you_submit');
+    expect(aboutYouSubmits).toHaveLength(1);
+    expect(aboutYouSubmits[0]).toMatchObject({ role: 'engineer' });
+  });
+
+  it('reports about_you_submit exactly once across a Back-then-Continue detour', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({
+        loggedIn: true,
+        profile: 'prod',
+        configPath: '/x',
+        user: { id: 'u', email: 'user@example.com' },
+      }),
+    ) as typeof fetch;
+    renderOnboarding();
+
+    fireEvent.click(await screen.findByRole('button', { name: /^Continue$/i }));
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'About you' })).toBeTruthy();
+    });
+    chooseDropdownOption('Your role', 'Engineer');
+
+    // About you -> Newsletter
+    fireEvent.click(screen.getByRole('button', { name: /^Continue$/i }));
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Stay in the loop' })).toBeTruthy();
+    });
+    // Back -> About you
+    fireEvent.click(screen.getByRole('button', { name: /^Back$/i }));
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'About you' })).toBeTruthy();
+    });
+    // Continue -> Newsletter again, then finish.
+    fireEvent.click(screen.getByRole('button', { name: /^Continue$/i }));
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Stay in the loop' })).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Finish setup/i }));
+
+    // The detour crosses the About-you step twice, but the snapshot must
+    // not double-fire.
+    const aboutYouSubmits = trackedEvents('ui_click')
+      .map(([, payload]) => payload as Record<string, unknown>)
+      .filter((payload) => payload.element === 'about_you_submit');
+    expect(aboutYouSubmits).toHaveLength(1);
   });
 
   it('persists the BYOK config before finishing onboarding', async () => {
@@ -781,8 +1001,8 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
           kind: 'success',
           latencyMs: 10,
           models: [
-            { id: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5' },
             { id: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
+            { id: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5' },
           ],
         });
       }
@@ -816,7 +1036,6 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'About you' })).toBeTruthy();
     });
-    // About you -> newsletter step
     fireEvent.click(screen.getByRole('button', { name: /^Continue$/i }));
     await waitFor(() => {
       expect(document.querySelector('.onboarding-view__email-input')).toBeTruthy();
@@ -837,30 +1056,292 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
     });
   });
 
-  it('lets Skip exit onboarding without starting AMR login', async () => {
+  it('automatically fetches BYOK models and tests the selected model in onboarding', async () => {
+    const fetchMock = vi.fn(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api/integrations/vela/status')) {
+        return jsonResponse({ loggedIn: false, profile: 'prod', user: null, configPath: '/x' });
+      }
+      if (url.endsWith('/api/provider/models') && init?.method === 'POST') {
+        return jsonResponse({
+          ok: true,
+          kind: 'success',
+          latencyMs: 10,
+          models: [
+            { id: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
+            { id: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5' },
+          ],
+        });
+      }
+      if (url.endsWith('/api/test/connection') && init?.method === 'POST') {
+        return jsonResponse({
+          ok: true,
+          kind: 'success',
+          latencyMs: 12,
+          model: 'claude-opus-4-8',
+          sample: 'Connected',
+        });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+    renderOnboarding();
+
+    fireEvent.click(screen.getByRole('button', { name: /Bring your own key/i }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'test-api-key' } });
+    fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'https://api.anthropic.com' } });
+
+    await waitFor(() => {
+      expect(screen.getByText('Fetched 2 models.')).toBeTruthy();
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/Connected\. Replied in 12 ms/i)).toBeTruthy();
+    });
+    const providerModelCalls = fetchMock.mock.calls.filter(([url]) =>
+      String(url).endsWith('/api/provider/models'),
+    );
+    const connectionTestCalls = fetchMock.mock.calls.filter(([url]) =>
+      String(url).endsWith('/api/test/connection'),
+    );
+    expect(providerModelCalls).toHaveLength(1);
+    expect(connectionTestCalls).toHaveLength(1);
+    expect(JSON.parse(String(connectionTestCalls[0]?.[1]?.body))).toMatchObject({
+      protocol: 'anthropic',
+      baseUrl: 'https://api.anthropic.com',
+      apiKey: 'test-api-key',
+      model: 'claude-opus-4-8',
+    });
+  });
+
+  it('automatically selects a cached BYOK model before testing in onboarding', async () => {
+    const fetchMock = vi.fn(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api/integrations/vela/status')) {
+        return jsonResponse({ loggedIn: false, profile: 'prod', user: null, configPath: '/x' });
+      }
+      if (url.endsWith('/api/test/connection') && init?.method === 'POST') {
+        return jsonResponse({
+          ok: true,
+          kind: 'success',
+          latencyMs: 12,
+          model: 'claude-opus-4-8',
+          sample: 'Connected',
+        });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+    const props = renderOnboarding({
+      providerModelsCache: {
+        [providerModelsCacheKey('anthropic', 'https://api.anthropic.com', 'test-api-key')]: [
+          { id: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
+          { id: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5' },
+        ],
+      },
+      onProviderModelsCacheChange: vi.fn(),
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /Bring your own key/i }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'test-api-key' } });
+    fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'https://api.anthropic.com' } });
+
+    await waitFor(() => {
+      expect(screen.getByText('Fetched 2 models.')).toBeTruthy();
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/Connected\. Replied in 12 ms/i)).toBeTruthy();
+    });
+    const providerModelCalls = fetchMock.mock.calls.filter(([url]) =>
+      String(url).endsWith('/api/provider/models'),
+    );
+    const connectionTestCalls = fetchMock.mock.calls.filter(([url]) =>
+      String(url).endsWith('/api/test/connection'),
+    );
+    expect(providerModelCalls).toHaveLength(0);
+    expect(connectionTestCalls).toHaveLength(1);
+    expect(props.onApiModelChange).toHaveBeenCalledWith('claude-opus-4-8');
+    expect(JSON.parse(String(connectionTestCalls[0]?.[1]?.body))).toMatchObject({
+      protocol: 'anthropic',
+      baseUrl: 'https://api.anthropic.com',
+      apiKey: 'test-api-key',
+      model: 'claude-opus-4-8',
+    });
+  });
+
+  it('ignores stale BYOK model fetch responses after onboarding inputs change', async () => {
+    let resolveFirstModelFetch: ((response: Response) => void) | null = null;
+    let providerModelRequestCount = 0;
+    const fetchMock = vi.fn((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api/integrations/vela/status')) {
+        return Promise.resolve(
+          jsonResponse({ loggedIn: false, profile: 'prod', user: null, configPath: '/x' }),
+        );
+      }
+      if (url.endsWith('/api/provider/models') && init?.method === 'POST') {
+        providerModelRequestCount += 1;
+        if (providerModelRequestCount === 1) {
+          return new Promise<Response>((resolve) => {
+            resolveFirstModelFetch = resolve;
+          });
+        }
+        return new Promise<Response>(() => {});
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+    const props = renderOnboarding();
+
+    fireEvent.click(screen.getByRole('button', { name: /Bring your own key/i }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'old-api-key' } });
+    fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'https://api.anthropic.com' } });
+
+    await waitFor(() => {
+      expect(providerModelRequestCount).toBe(1);
+    });
+
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'new-api-key' } });
+
+    await act(async () => {
+      resolveFirstModelFetch?.(
+        jsonResponse({
+          ok: true,
+          kind: 'success',
+          latencyMs: 10,
+          models: [
+            { id: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
+            { id: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5' },
+          ],
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(props.onApiModelChange).not.toHaveBeenCalled();
+    expect((props.onConfigPersist as ReturnType<typeof vi.fn>).mock.calls).not.toContainEqual([
+      expect.objectContaining({
+        apiKey: 'old-api-key',
+        model: 'claude-opus-4-8',
+      }),
+    ]);
+    expect((props.onConfigPersist as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0]).toMatchObject({
+      apiKey: 'new-api-key',
+      model: '',
+    });
+  });
+
+  it('ignores stale BYOK model fetch responses after switching to Local CLI', async () => {
+    let resolveModelFetch: ((response: Response) => void) | null = null;
+    let providerModelRequestCount = 0;
+    const fetchMock = vi.fn((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api/integrations/vela/status')) {
+        return Promise.resolve(
+          jsonResponse({ loggedIn: false, profile: 'prod', user: null, configPath: '/x' }),
+        );
+      }
+      if (url.endsWith('/api/provider/models') && init?.method === 'POST') {
+        providerModelRequestCount += 1;
+        return new Promise<Response>((resolve) => {
+          resolveModelFetch = resolve;
+        });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+    const props = renderOnboarding();
+
+    fireEvent.click(screen.getByRole('button', { name: /Bring your own key/i }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'test-api-key' } });
+    fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'https://api.anthropic.com' } });
+
+    await waitFor(() => {
+      expect(providerModelRequestCount).toBe(1);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /Local coding agent/i }));
+    await act(async () => {});
+
+    await act(async () => {
+      resolveModelFetch?.(
+        jsonResponse({
+          ok: true,
+          kind: 'success',
+          latencyMs: 10,
+          models: [
+            { id: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
+            { id: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5' },
+          ],
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(props.onApiModelChange).not.toHaveBeenCalledWith('claude-opus-4-8');
+    expect((props.onConfigPersist as ReturnType<typeof vi.fn>).mock.calls).not.toContainEqual([
+      expect.objectContaining({
+        mode: 'api',
+        model: 'claude-opus-4-8',
+      }),
+    ]);
+    expect(props.onModeChange).toHaveBeenCalledWith('daemon');
+  });
+
+  it('shows the AMR cloud card as a skeleton while agent detection is still in flight', async () => {
+    // Before this fix, the AMR cloud card was simply absent for the several
+    // seconds AMR's probe takes to settle (showAmrCloudOption was false once
+    // any non-AMR agent had arrived), then popped in with no loading state.
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({ loggedIn: false, profile: 'prod', user: null, configPath: '/x' }),
+    ) as typeof fetch;
+    renderOnboarding({
+      agents: [cliAgent()], // AMR has not surfaced from the stream yet
+      agentsLoading: true, // cold-start detection stream still running
+      onRefreshAgents: vi.fn(() => [cliAgent()]),
+    });
+
+    const skeleton = document.querySelector('.onboarding-view__card--skeleton');
+    expect(skeleton).toBeTruthy();
+    // The brand identity is known up-front and rendered solid; only the
+    // probe-dependent details shimmer.
+    expect(skeleton?.textContent).toContain('Open Design AMR');
+    expect(skeleton?.getAttribute('aria-busy')).toBe('true');
+    expect(skeleton?.querySelectorAll('.onboarding-view__skeleton-line--benefit').length).toBe(4);
+    expect(skeleton?.querySelector('.onboarding-view__skeleton-model-bar')).toBeTruthy();
+    // The real, selectable AMR card is not present while detecting.
+    expect(screen.queryByRole('button', { name: /Open Design AMR/i })).toBeNull();
+    // Alternatives remain available throughout detection.
+    expect(screen.getByRole('button', { name: /Local coding agent/i })).toBeTruthy();
+  });
+
+  it('renders the real AMR cloud card and no skeleton once AMR is available', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({ loggedIn: false, profile: 'prod', user: null, configPath: '/x' }),
+    ) as typeof fetch;
+    renderOnboarding({ agentsLoading: false });
+
+    expect(screen.getByRole('button', { name: /Open Design AMR/i })).toBeTruthy();
+    expect(document.querySelector('.onboarding-view__card--skeleton')).toBeNull();
+  });
+
+  it('shows no Skip affordance on the Connect step', async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL) =>
       jsonResponse({ loggedIn: false, profile: 'prod', user: null, configPath: '/x' }),
     );
     globalThis.fetch = fetchMock as typeof fetch;
     const props = renderOnboarding();
+    await act(async () => {});
 
-    fireEvent.click(screen.getByRole('button', { name: /Skip/i }));
-
-    expect(props.onCompleteOnboarding).toHaveBeenCalledTimes(1);
-    expect(props.onConfigPersist).not.toHaveBeenCalled();
-    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/api/integrations/vela/login'))).toBe(false);
-    expect(findTrackedEvent('ui_click', (payload) => payload.element === 'skip')).toMatchObject({
-      page_name: 'onboarding',
-      area: 'runtime',
-      element: 'skip',
-      action: 'skip',
-    });
-    expect(latestTrackedEvent('onboarding_complete_result')).toMatchObject({
-      page_name: 'onboarding',
-      area: 'onboarding',
-      result: 'skipped',
-      completion_type: 'skipped',
-      runtime_type: 'amr_cloud',
-    });
+    // "Skip for now" was removed — Connect is a required step. The Connect
+    // step exposes no secondary Skip/Back button, onboarding is not completed
+    // from here, and no skip telemetry fires.
+    expect(screen.queryByRole('button', { name: /Skip/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Back$/i })).toBeNull();
+    expect(props.onCompleteOnboarding).not.toHaveBeenCalled();
+    const skipClicks = trackedEvents('ui_click')
+      .map(([, payload]) => payload as Record<string, unknown>)
+      .filter((payload) => payload.element === 'skip');
+    expect(skipClicks).toHaveLength(0);
+    expect(trackedEvents('onboarding_complete_result')).toHaveLength(0);
   });
 });

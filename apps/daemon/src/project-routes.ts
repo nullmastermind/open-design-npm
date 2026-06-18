@@ -19,6 +19,7 @@ import {
 } from './plugins/index.js';
 import { connectorService } from './connectors/service.js';
 import type { RouteDeps } from './server-context.js';
+import { readAnalyticsContext } from './analytics.js';
 import { listSkills } from './skills.js';
 import { isSafeId } from './projects.js';
 import {
@@ -30,6 +31,7 @@ import {
   writeProjectManifest,
 } from './project-locations.js';
 import { auditDesignSystemPackage } from './tools-connectors-cli.js';
+import { parseOrchestratorWorkspace } from './workspace-contract.js';
 
 export interface RegisterProjectRoutesDeps extends RouteDeps<'db' | 'design' | 'http' | 'paths' | 'projectStore' | 'projectFiles' | 'conversations' | 'templates' | 'status' | 'events' | 'ids' | 'telemetry' | 'appConfig' | 'validation'> {}
 
@@ -136,6 +138,13 @@ const URL_PREVIEW_SCROLL_BRIDGE = `<script data-od-url-scroll-bridge>
   }
 })();
 </script>`;
+
+function sameOrchestratorWorkspace(a: unknown, b: unknown): boolean {
+  const parsedA = parseOrchestratorWorkspace(a);
+  const parsedB = parseOrchestratorWorkspace(b);
+  if (!parsedA.ok || !parsedB.ok) return false;
+  return JSON.stringify(parsedA.value) === JSON.stringify(parsedB.value);
+}
 
 const URL_PREVIEW_SELECTION_BRIDGE = `<script data-od-url-selection-bridge>
 (function(){
@@ -1084,6 +1093,24 @@ export function registerProjectRoutes(app: Express, ctx: RegisterProjectRoutesDe
             'fromTrustedPicker can only be set via POST /api/import/folder',
           );
         }
+        if ('orchestratorWorkspace' in metadata) {
+          return sendApiError(
+            res, 400, 'BAD_REQUEST',
+            'orchestratorWorkspace can only be set via POST /api/import/folder or POST /api/projects/:id/working-dir',
+          );
+        }
+        // Reject invalid linked working directories up front (consistent with
+        // PATCH /api/projects/:id) instead of silently dropping them. The
+        // caller promises the agent `--add-dir` access to this folder; if the
+        // path is deleted/inaccessible/a system dir, fail loudly so the client
+        // can surface it rather than creating a project + auto-running a turn
+        // whose linked-dir access never materialises.
+        if (Array.isArray(metadata.linkedDirs)) {
+          const validated = validateLinkedDirs(metadata.linkedDirs);
+          if (validated.error) {
+            return sendApiError(res, 400, 'INVALID_LINKED_DIR', validated.error);
+          }
+        }
       }
       if (customInstructions !== undefined
           && typeof customInstructions !== 'string'
@@ -1326,6 +1353,17 @@ export function registerProjectRoutes(app: Express, ctx: RegisterProjectRoutesDe
       // For case 2 we re-stamp the immutable fields from the existing
       // project record onto the incoming patch so the user can keep
       // patching other metadata without ever losing their import root.
+      if (patch.metadata === null) {
+        const existing = getProject(db, req.params.id);
+        if (existing?.metadata?.baseDir) {
+          return sendApiError(
+            res,
+            400,
+            'BAD_REQUEST',
+            'metadata cannot be cleared for imported projects',
+          );
+        }
+      }
       if (patch.metadata && typeof patch.metadata === 'object') {
         const existing = getProject(db, req.params.id);
         const existingMeta = existing?.metadata;
@@ -1336,7 +1374,34 @@ export function registerProjectRoutes(app: Express, ctx: RegisterProjectRoutesDe
             'fromTrustedPicker can only be set via POST /api/import/folder',
           );
         }
+        if ('orchestratorWorkspace' in patch.metadata) {
+          const parsedOrchestratorWorkspace = parseOrchestratorWorkspace(
+            patch.metadata.orchestratorWorkspace,
+          );
+          if (!parsedOrchestratorWorkspace.ok) {
+            return sendApiError(
+              res,
+              400,
+              'BAD_REQUEST',
+              parsedOrchestratorWorkspace.message,
+            );
+          }
+        }
         if (existingMeta?.baseDir) {
+          if ('orchestratorWorkspace' in patch.metadata) {
+            if (
+              existingMeta.orchestratorWorkspace == null ||
+              !sameOrchestratorWorkspace(
+                patch.metadata.orchestratorWorkspace,
+                existingMeta.orchestratorWorkspace,
+              )
+            ) {
+              return sendApiError(
+                res, 400, 'BAD_REQUEST',
+                'orchestratorWorkspace is immutable after import; use the working-dir route to change it',
+              );
+            }
+          }
           if ('baseDir' in patch.metadata && patch.metadata.baseDir !== existingMeta.baseDir) {
             return sendApiError(
               res, 400, 'BAD_REQUEST',
@@ -1358,6 +1423,9 @@ export function registerProjectRoutes(app: Express, ctx: RegisterProjectRoutesDe
             ...(existingMeta.fromTrustedPicker === true
               ? { fromTrustedPicker: true as const }
               : {}),
+            ...(existingMeta.orchestratorWorkspace
+              ? { orchestratorWorkspace: existingMeta.orchestratorWorkspace }
+              : {}),
           };
         } else if ('baseDir' in patch.metadata) {
           // Non-imported project trying to acquire a baseDir → reject (only
@@ -1365,6 +1433,11 @@ export function registerProjectRoutes(app: Express, ctx: RegisterProjectRoutesDe
           return sendApiError(
             res, 400, 'BAD_REQUEST',
             'baseDir can only be set via POST /api/import/folder',
+          );
+        } else if ('orchestratorWorkspace' in patch.metadata) {
+          return sendApiError(
+            res, 400, 'BAD_REQUEST',
+            'orchestratorWorkspace can only be set via POST /api/import/folder or POST /api/projects/:id/working-dir',
           );
         }
       }
@@ -1614,7 +1687,11 @@ export function registerProjectRoutes(app: Express, ctx: RegisterProjectRoutesDe
     });
     // Bump the parent project's updatedAt so the project list re-orders.
     updateProject(db, req.params.id, {});
-    ctx.telemetry?.reportFinalizedMessage(saved, m);
+    ctx.telemetry?.reportFinalizedMessage(saved, m, {
+      analyticsContext: readAnalyticsContext(req),
+      projectId: req.params.id,
+      conversationId: req.params.cid,
+    });
     res.json({ message: saved });
   });
 
@@ -1920,7 +1997,7 @@ export function registerProjectFileRoutes(app: Express, ctx: RegisterProjectFile
     relPath: string,
     metadata?: unknown,
     beforeSend?: (mime: string) => void,
-    transformFile?: (file: { mime: string; buffer: Buffer }) => Buffer | string,
+    transformFile?: (file: { mime: string; buffer: Buffer }) => Buffer | string | Promise<Buffer | string>,
   ) {
     const meta = await resolveProjectFilePath(
       PROJECTS_DIR,
@@ -1975,7 +2052,7 @@ export function registerProjectFileRoutes(app: Express, ctx: RegisterProjectFile
     }
 
     const file = await readProjectFile(PROJECTS_DIR, projectId, relPath, metadata);
-    res.type(file.mime).send(transformFile ? transformFile(file) : file.buffer);
+    res.type(file.mime).send(transformFile ? await transformFile(file) : file.buffer);
   }
 
   function previewFilePathForProject(project: any, queryFile: unknown): string {
@@ -1988,6 +2065,46 @@ export function registerProjectFileRoutes(app: Express, ctx: RegisterProjectFile
 
   function encodeProjectPathForUrl(filePath: string): string {
     return filePath.split('/').map((segment) => encodeURIComponent(segment)).join('/');
+  }
+
+  async function maybeResolveVitePreviewHtml({
+    file,
+    projectId,
+    relPath,
+    metadata,
+    projectsRoot,
+    readProjectFile,
+  }: {
+    file: { mime: string; buffer: Buffer };
+    projectId: string;
+    relPath: string;
+    metadata?: unknown;
+    projectsRoot: string;
+    readProjectFile: (projectsRoot: string, projectId: string, relPath: string, metadata?: unknown) => Promise<{ buffer: Buffer }>;
+  }): Promise<Buffer | string> {
+    if (!/^text\/html(?:;|$)/i.test(file.mime)) return file.buffer;
+    const html = file.buffer.toString('utf8');
+    if (!isViteDevHtmlEntry(html)) return file.buffer;
+
+    const ownerDir = path.posix.dirname(relPath);
+    const distRelPath = ownerDir === '.' ? 'dist/index.html' : `${ownerDir}/dist/index.html`;
+    try {
+      const distFile = await readProjectFile(projectsRoot, projectId, distRelPath, metadata);
+      return rewriteViteDistAssetUrlsForPreview(distFile.buffer.toString('utf8'));
+    } catch {
+      return file.buffer;
+    }
+  }
+
+  function isViteDevHtmlEntry(html: string): boolean {
+    return /<script\b[^>]*\btype\s*=\s*["']module["'][^>]*\bsrc\s*=\s*["']\/src\/[^"']+["'][^>]*>\s*<\/script>/i.test(html);
+  }
+
+  function rewriteViteDistAssetUrlsForPreview(html: string): string {
+    return html.replace(
+      /\b(href|src)\s*=\s*(["'])\/assets\//gi,
+      (_match, attr: string, quote: string) => `${attr}=${quote}dist/assets/`,
+    );
   }
 
   // Project files. Each project owns a flat folder under .od/projects/<id>/
@@ -2177,6 +2294,14 @@ export function registerProjectFileRoutes(app: Express, ctx: RegisterProjectFile
         relPath,
         project.metadata,
         () => setProjectPreviewHeaders(res),
+        async (file) => maybeResolveVitePreviewHtml({
+          file,
+          projectId: project.id,
+          relPath,
+          metadata: project.metadata,
+          projectsRoot: PROJECTS_DIR,
+          readProjectFile,
+        }),
       );
     } catch (err: any) {
       const status = err && err.code === 'ENOENT' ? 404 : 400;
@@ -2223,14 +2348,22 @@ export function registerProjectFileRoutes(app: Express, ctx: RegisterProjectFile
         relPath,
         project?.metadata,
         undefined,
-        (file) => {
+        async (file) => {
+          let transformed = await maybeResolveVitePreviewHtml({
+            file,
+            projectId,
+            relPath,
+            metadata: project?.metadata,
+            projectsRoot: PROJECTS_DIR,
+            readProjectFile,
+          });
           if (
             (wantsUrlPreviewScrollBridge(req.query.odPreviewBridge) ||
               wantsUrlPreviewSelectionBridge(req.query.odPreviewBridge) ||
               wantsUrlPreviewSnapshotBridge(req.query.odPreviewBridge)) &&
             /^text\/html(?:;|$)/i.test(file.mime)
           ) {
-            let html = file.buffer.toString('utf8');
+            let html = Buffer.isBuffer(transformed) ? transformed.toString('utf8') : transformed;
             if (wantsUrlPreviewScrollBridge(req.query.odPreviewBridge)) {
               html = injectUrlPreviewBridge(html, 'scroll');
             }
@@ -2240,9 +2373,9 @@ export function registerProjectFileRoutes(app: Express, ctx: RegisterProjectFile
             if (wantsUrlPreviewSnapshotBridge(req.query.odPreviewBridge)) {
               html = injectUrlPreviewBridge(html, 'snapshot');
             }
-            return html;
+            transformed = html;
           }
-          return file.buffer;
+          return transformed;
         },
       );
     } catch (err: any) {

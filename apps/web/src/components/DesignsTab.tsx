@@ -1,5 +1,6 @@
 import type { CSSProperties } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { Dialog, DialogDescription, DialogFooter, DialogTitle } from "@open-design/components";
 import { projectKindToTracking } from "@open-design/contracts/analytics";
 import { useAnalytics } from "../analytics/provider";
 import {
@@ -82,6 +83,8 @@ export function DesignsTab({
 	onRename,
 	onNewProject,
 }: Props) {
+	const renameTitleId = useId();
+	const confirmTitleId = useId();
 	const t = useT();
 	const analytics = useAnalytics();
 	// P0 page_view page_name=projects — fire once when the tab mounts so
@@ -671,7 +674,7 @@ export function DesignsTab({
 										toggleSelected(p.id);
 									} else {
 										// P0 ui_click area=list element=project_card.
-										const projectKind = projectKindToTracking(p.metadata?.kind);
+										const projectKind = projectKindToTracking(p.metadata?.kind, p.metadata?.videoModel);
 										trackProjectsListClick(analytics.track, {
 											page_name: "projects",
 											area: "list",
@@ -713,7 +716,7 @@ export function DesignsTab({
 												setMenuOpenId((cur) => {
 													const nextId = cur === p.id ? null : p.id;
 													if (nextId === p.id) {
-														const projectKind = projectKindToTracking(p.metadata?.kind);
+														const projectKind = projectKindToTracking(p.metadata?.kind, p.metadata?.videoModel);
 														trackProjectsListClick(analytics.track, {
 															page_name: "projects",
 															area: "list",
@@ -738,7 +741,7 @@ export function DesignsTab({
 												type="button"
 												role="menuitem"
 												onClick={() => {
-													const projectKind = projectKindToTracking(p.metadata?.kind);
+													const projectKind = projectKindToTracking(p.metadata?.kind, p.metadata?.videoModel);
 													trackProjectsMorePopoverClick(analytics.track, {
 														page_name: "projects",
 														area: "projects_more_popover",
@@ -758,7 +761,7 @@ export function DesignsTab({
 												role="menuitem"
 												className="danger"
 												onClick={() => {
-													const projectKind = projectKindToTracking(p.metadata?.kind);
+													const projectKind = projectKindToTracking(p.metadata?.kind, p.metadata?.videoModel);
 													trackProjectsMorePopoverClick(analytics.track, {
 														page_name: "projects",
 														area: "projects_more_popover",
@@ -927,78 +930,71 @@ export function DesignsTab({
 				</div>
 			)}
 			{renameTarget ? (
-				<div className="modal-backdrop" onClick={cancelRename}>
-					<form
-						className="modal modal-rename"
-						onClick={(e) => e.stopPropagation()}
-						onSubmit={(e) => {
-							e.preventDefault();
-							commitRename();
-						}}
-					>
-						<h2>{t("designs.renameTitle")}</h2>
-						<label>
-							{t("designs.renamePrompt", { name: renameTarget.original })}
-							<input
-								type="text"
-								value={renameInput}
-								autoFocus
-								onChange={(e) => setRenameInput(e.target.value)}
-								onKeyDown={(e) => {
-									if (e.key === "Escape") {
-										e.preventDefault();
-										cancelRename();
-									}
-								}}
-							/>
-						</label>
-						<div className="row">
-							<button type="button" onClick={cancelRename}>
-								{t("designs.renameCancel")}
-							</button>
-							<button
-								type="submit"
-								className="primary"
-								disabled={
-									!renameInput.trim() ||
-									renameInput.trim() === renameTarget.original
-								}
-							>
-								{t("designs.renameSave")}
-							</button>
-						</div>
-					</form>
-				</div>
+				<Dialog
+					as="form"
+					className="modal-rename"
+					onClose={cancelRename}
+					closeOnEscape
+					ariaLabelledBy={renameTitleId}
+					onSubmit={(e) => {
+						e.preventDefault();
+						commitRename();
+					}}
+				>
+					<DialogTitle id={renameTitleId}>{t("designs.renameTitle")}</DialogTitle>
+					<label>
+						{t("designs.renamePrompt", { name: renameTarget.original })}
+						<input
+							type="text"
+							value={renameInput}
+							autoFocus
+							onChange={(e) => setRenameInput(e.target.value)}
+						/>
+					</label>
+					<DialogFooter className="row">
+						<button type="button" onClick={cancelRename}>
+							{t("designs.renameCancel")}
+						</button>
+						<button
+							type="submit"
+							className="primary"
+							disabled={
+								!renameInput.trim() ||
+								renameInput.trim() === renameTarget.original
+							}
+						>
+							{t("designs.renameSave")}
+						</button>
+					</DialogFooter>
+				</Dialog>
 			) : null}
 			{confirmTarget ? (
-				<div className="modal-backdrop" onClick={() => setConfirmTarget(null)}>
-					<div
-						className="modal modal-confirm"
-						onClick={(e) => e.stopPropagation()}
-						role="alertdialog"
-						aria-modal="true"
-					>
-						<h2>{confirmTarget.title}</h2>
-						<p className="modal-confirm-message">{confirmTarget.message}</p>
-						<div className="row">
-							<button type="button" onClick={() => setConfirmTarget(null)}>
-								{t("designs.renameCancel")}
-							</button>
-							<button
-								type="button"
-								className="primary danger"
-								autoFocus
-								onClick={() => {
-									const run = confirmTarget.onConfirm;
-									setConfirmTarget(null);
-									run();
-								}}
-							>
-								{confirmTarget.confirmLabel}
-							</button>
-						</div>
-					</div>
-				</div>
+				<Dialog
+					className="modal-confirm"
+					role="alertdialog"
+					onClose={() => setConfirmTarget(null)}
+					ariaLabelledBy={confirmTitleId}
+				>
+					<DialogTitle id={confirmTitleId}>{confirmTarget.title}</DialogTitle>
+					<DialogDescription className="modal-confirm-message">{confirmTarget.message}</DialogDescription>
+					<DialogFooter className="row">
+						<button type="button" onClick={() => setConfirmTarget(null)}>
+							{t("designs.renameCancel")}
+						</button>
+						<button
+							type="button"
+							className="primary danger"
+							autoFocus
+							onClick={() => {
+								const run = confirmTarget.onConfirm;
+								setConfirmTarget(null);
+								run();
+							}}
+						>
+							{confirmTarget.confirmLabel}
+						</button>
+					</DialogFooter>
+				</Dialog>
 			) : null}
 			<AnimatePresence>
 				{deleteToast ? (

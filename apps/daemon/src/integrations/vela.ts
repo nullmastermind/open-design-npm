@@ -23,6 +23,10 @@ const AMR_ENTRY_SOURCES: ReadonlySet<TrackingAmrEntrySource> = new Set([
   'inline_model_switcher_amr_row',
   'settings_amr_agent_card',
   'settings_amr_authorize',
+  'settings_amr_console',
+  'settings_amr_install',
+  'avatar_amr_console',
+  'handoff_amr_website',
   'chat_error_authorize_retry',
   'chat_error_recharge',
   'chat_error_switch_retry_card',
@@ -31,9 +35,14 @@ const AMR_ENTRY_SOURCES: ReadonlySet<TrackingAmrEntrySource> = new Set([
   'generation_preview_switch_retry_card',
 ]);
 
+const AMR_ONBOARDING_PROFILE_SOURCES: ReadonlySet<TrackingAmrEntrySource> = new Set([
+  'onboarding_amr_card',
+  'onboarding_amr_sign_in_continue',
+]);
+
 type AmrEntrySourcePageName = Extract<
   TrackingPageName,
-  'onboarding' | 'chat_panel' | 'settings' | 'file_manager'
+  'onboarding' | 'chat_panel' | 'settings' | 'file_manager' | 'artifact'
 >;
 
 const AMR_ENTRY_SOURCE_PAGES: ReadonlySet<AmrEntrySourcePageName> = new Set([
@@ -41,6 +50,7 @@ const AMR_ENTRY_SOURCE_PAGES: ReadonlySet<AmrEntrySourcePageName> = new Set([
   'chat_panel',
   'settings',
   'file_manager',
+  'artifact',
 ]);
 
 const AMR_ENTRY_SOURCE_PAGE_BY_SOURCE: Record<
@@ -52,6 +62,10 @@ const AMR_ENTRY_SOURCE_PAGE_BY_SOURCE: Record<
   inline_model_switcher_amr_row: 'chat_panel',
   settings_amr_agent_card: 'settings',
   settings_amr_authorize: 'settings',
+  settings_amr_console: 'settings',
+  settings_amr_install: 'settings',
+  avatar_amr_console: 'chat_panel',
+  handoff_amr_website: 'artifact',
   chat_error_authorize_retry: 'chat_panel',
   chat_error_recharge: 'chat_panel',
   chat_error_switch_retry_card: 'chat_panel',
@@ -63,6 +77,7 @@ const AMR_ENTRY_SOURCE_PAGE_BY_SOURCE: Record<
 const AMR_ANALYTICS_EVENTS_URL =
   'https://amr-api.open-design.ai/api/v1/analytics/events';
 const AMR_ANALYTICS_TIMEOUT_MS = 1500;
+const OD_DEVICE_ID_MAX_LENGTH = 128;
 
 type AmrAnalyticsEnv = 'local' | 'test' | 'staging' | 'production';
 
@@ -83,6 +98,31 @@ export interface AmrEntryAnalyticsPayload {
   sourceProduct: 'open_design';
   sourceDetail: TrackingAmrEntrySource;
   entryOccurredAt: string;
+  // Optional self-reported onboarding profile, forwarded to AMR for paid-
+  // conversion segmentation. Open strings (not a union) so a new onboarding
+  // option never forces a contract bump on either side. useCase is multi-select.
+  odRole?: string;
+  odOrgSize?: string;
+  odUseCase?: string[];
+  odSource?: string;
+}
+
+export interface AmrOnboardingProfileAnalyticsPayload {
+  pageName: 'open_design';
+  sourcePageName: 'onboarding';
+  area: 'onboarding';
+  element: 'about_you_submit';
+  action: 'submit_profile';
+  entryId: string;
+  sourceProduct: 'open_design';
+  sourceDetail: TrackingAmrEntrySource;
+  entryOccurredAt: string;
+  profileOccurredAt: string;
+  odDeviceId?: string;
+  odRole?: string;
+  odOrgSize?: string;
+  odUseCase?: string[];
+  odSource?: string;
 }
 
 export interface AmrEntryAnalyticsContext {
@@ -318,6 +358,7 @@ export interface SpawnVelaLoginDeps {
   configuredEnv?: Record<string, string>;
   baseEnv?: NodeJS.ProcessEnv;
   attribution?: AmrEntryAttribution | null;
+  defaultApiUrl?: string | null;
 }
 
 async function waitForImmediateLoginFailure(child: ChildProcess): Promise<void> {
@@ -378,7 +419,11 @@ export async function spawnVelaLogin(
   const def = getAgentDef('amr');
   if (!def) throw new Error('AMR runtime def not registered');
   const baseEnv = deps.baseEnv ?? process.env;
-  const configuredEnv = deps.configuredEnv ?? {};
+  const configuredEnv = withDefaultVelaApiUrl(
+    deps.configuredEnv ?? {},
+    baseEnv,
+    deps.defaultApiUrl,
+  );
   const launch = resolveAgentLaunch(def, configuredEnv);
   const bin = launch.selectedPath;
   if (!bin) {
@@ -420,6 +465,18 @@ export async function spawnVelaLogin(
   };
 }
 
+function withDefaultVelaApiUrl(
+  configuredEnv: Record<string, string>,
+  baseEnv: NodeJS.ProcessEnv,
+  defaultApiUrl: string | null | undefined,
+): Record<string, string> {
+  const trimmed = defaultApiUrl?.trim();
+  if (!trimmed) return configuredEnv;
+  if ((configuredEnv.VELA_API_URL ?? '').trim()) return configuredEnv;
+  if ((baseEnv.VELA_API_URL ?? '').trim()) return configuredEnv;
+  return { ...configuredEnv, VELA_API_URL: trimmed };
+}
+
 export function parseVelaLoginAttribution(input: unknown): AmrEntryAttribution | null {
   const raw = input && typeof input === 'object' && 'attribution' in input
     ? (input as { attribution?: unknown }).attribution
@@ -437,11 +494,13 @@ export function parseVelaLoginAttribution(input: unknown): AmrEntryAttribution |
   ) {
     return null;
   }
+  const odDeviceId = sanitizeOpenDesignDeviceId(value.odDeviceId);
   return {
     entryId: value.entryId,
     sourceProduct: value.sourceProduct,
     sourceDetail: value.sourceDetail as TrackingAmrEntrySource,
     occurredAt: value.occurredAt,
+    ...(odDeviceId ? { odDeviceId } : {}),
   };
 }
 
@@ -459,6 +518,10 @@ export function parseAmrEntryAnalyticsPayload(
   const sourceProduct = raw.sourceProduct;
   const sourceDetail = raw.sourceDetail;
   const entryOccurredAt = raw.entryOccurredAt;
+  const odRole = sanitizeOptionalProfileValue(raw.odRole);
+  const odOrgSize = sanitizeOptionalProfileValue(raw.odOrgSize);
+  const odSource = sanitizeOptionalProfileValue(raw.odSource);
+  const odUseCase = sanitizeOptionalProfileList(raw.odUseCase);
   if (
     pageName !== 'open_design'
     || typeof sourcePageName !== 'string'
@@ -477,6 +540,10 @@ export function parseAmrEntryAnalyticsPayload(
       !== AMR_ENTRY_SOURCE_PAGE_BY_SOURCE[sourceDetail as TrackingAmrEntrySource]
     || typeof entryOccurredAt !== 'string'
     || !Number.isFinite(Date.parse(entryOccurredAt))
+    || odRole === INVALID_PROFILE_VALUE
+    || odOrgSize === INVALID_PROFILE_VALUE
+    || odSource === INVALID_PROFILE_VALUE
+    || odUseCase === INVALID_PROFILE_VALUE
   ) {
     return null;
   }
@@ -490,12 +557,139 @@ export function parseAmrEntryAnalyticsPayload(
     sourceProduct,
     sourceDetail: sourceDetail as TrackingAmrEntrySource,
     entryOccurredAt,
+    ...(odRole ? { odRole } : {}),
+    ...(odOrgSize ? { odOrgSize } : {}),
+    ...(odUseCase ? { odUseCase } : {}),
+    ...(odSource ? { odSource } : {}),
   };
+}
+
+export function parseAmrOnboardingProfileAnalyticsPayload(
+  input: unknown,
+): AmrOnboardingProfileAnalyticsPayload | null {
+  const raw = isRecord(input) && 'payload' in input ? input.payload : input;
+  if (!isRecord(raw)) return null;
+  const pageName = raw.pageName;
+  const sourcePageName = raw.sourcePageName;
+  const area = raw.area;
+  const element = raw.element;
+  const action = raw.action;
+  const entryId = raw.entryId;
+  const sourceProduct = raw.sourceProduct;
+  const sourceDetail = raw.sourceDetail;
+  const entryOccurredAt = raw.entryOccurredAt;
+  const profileOccurredAt = raw.profileOccurredAt;
+  const odDeviceId = sanitizeOpenDesignDeviceId(raw.odDeviceId);
+  const odRole = sanitizeOptionalProfileValue(raw.odRole);
+  const odOrgSize = sanitizeOptionalProfileValue(raw.odOrgSize);
+  const odSource = sanitizeOptionalProfileValue(raw.odSource);
+  const odUseCase = sanitizeOptionalProfileList(raw.odUseCase);
+  if (
+    pageName !== 'open_design'
+    || sourcePageName !== 'onboarding'
+    || area !== 'onboarding'
+    || element !== 'about_you_submit'
+    || action !== 'submit_profile'
+    || typeof entryId !== 'string'
+    || entryId.length === 0
+    || sourceProduct !== 'open_design'
+    || typeof sourceDetail !== 'string'
+    || !AMR_ENTRY_SOURCES.has(sourceDetail as TrackingAmrEntrySource)
+    || !AMR_ONBOARDING_PROFILE_SOURCES.has(sourceDetail as TrackingAmrEntrySource)
+    || typeof entryOccurredAt !== 'string'
+    || !Number.isFinite(Date.parse(entryOccurredAt))
+    || typeof profileOccurredAt !== 'string'
+    || !Number.isFinite(Date.parse(profileOccurredAt))
+    || odRole === INVALID_PROFILE_VALUE
+    || odOrgSize === INVALID_PROFILE_VALUE
+    || odSource === INVALID_PROFILE_VALUE
+    || odUseCase === INVALID_PROFILE_VALUE
+    || (!odRole && !odOrgSize && !odSource && !odUseCase)
+  ) {
+    return null;
+  }
+  return {
+    pageName,
+    sourcePageName,
+    area,
+    element,
+    action,
+    entryId,
+    sourceProduct,
+    sourceDetail: sourceDetail as TrackingAmrEntrySource,
+    entryOccurredAt,
+    profileOccurredAt,
+    ...(odDeviceId ? { odDeviceId } : {}),
+    ...(odRole ? { odRole } : {}),
+    ...(odOrgSize ? { odOrgSize } : {}),
+    ...(odUseCase ? { odUseCase } : {}),
+    ...(odSource ? { odSource } : {}),
+  };
+}
+
+// Optional profile values are open strings; we accept absent/undefined, reject
+// a present-but-wrong type or an over-long value (matches AMR's 64-char cap),
+// and otherwise pass the trimmed string through.
+const INVALID_PROFILE_VALUE = Symbol('invalid_profile_value');
+
+function sanitizeOptionalProfileValue(
+  value: unknown,
+): string | undefined | typeof INVALID_PROFILE_VALUE {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') return INVALID_PROFILE_VALUE;
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > 64) return INVALID_PROFILE_VALUE;
+  return trimmed;
+}
+
+// useCase is multi-select: accept absent/undefined, reject a non-array or any
+// element that fails the open-string check, cap the count (matches AMR's array
+// bound), and pass the trimmed list through.
+function sanitizeOptionalProfileList(
+  value: unknown,
+): string[] | undefined | typeof INVALID_PROFILE_VALUE {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || value.length > 20) return INVALID_PROFILE_VALUE;
+  const cleaned: string[] = [];
+  for (const entry of value) {
+    const sanitized = sanitizeOptionalProfileValue(entry);
+    if (sanitized === INVALID_PROFILE_VALUE || sanitized === undefined) {
+      return INVALID_PROFILE_VALUE;
+    }
+    cleaned.push(sanitized);
+  }
+  return cleaned.length > 0 ? cleaned : undefined;
+}
+
+function sanitizeOpenDesignDeviceId(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > OD_DEVICE_ID_MAX_LENGTH) return null;
+  return trimmed;
 }
 
 export async function mirrorAmrEntryAnalytics(
   payload: AmrEntryAnalyticsPayload,
   deps: MirrorAmrEntryAnalyticsDeps = {},
+): Promise<MirrorAmrEntryAnalyticsResult> {
+  return mirrorAmrAnalyticsEvent(buildAmrEntryAnalyticsCommon(payload, deps), payload, deps);
+}
+
+export async function mirrorAmrOnboardingProfileAnalytics(
+  payload: AmrOnboardingProfileAnalyticsPayload,
+  deps: MirrorAmrEntryAnalyticsDeps = {},
+): Promise<MirrorAmrEntryAnalyticsResult> {
+  return mirrorAmrAnalyticsEvent(
+    buildAmrOnboardingProfileAnalyticsCommon(payload, deps),
+    payload,
+    deps,
+  );
+}
+
+async function mirrorAmrAnalyticsEvent(
+  common: Record<string, unknown>,
+  payload: AmrEntryAnalyticsPayload | AmrOnboardingProfileAnalyticsPayload,
+  deps: MirrorAmrEntryAnalyticsDeps,
 ): Promise<MirrorAmrEntryAnalyticsResult> {
   const fetchImpl = deps.fetchImpl ?? (globalThis.fetch as unknown as FetchLike | undefined);
   if (!fetchImpl) return { mirrored: false };
@@ -514,7 +708,7 @@ export async function mirrorAmrEntryAnalytics(
       body: JSON.stringify({
         events: [
           {
-            common: buildAmrEntryAnalyticsCommon(payload, deps),
+            common,
             payload,
           },
         ],
@@ -540,6 +734,9 @@ function velaLoginAttributionEnv(
     OPEN_DESIGN_AMR_ENTRY_SOURCE: attribution.sourceDetail,
     OPEN_DESIGN_AMR_ENTRY_AT: attribution.occurredAt,
     OPEN_DESIGN_AMR_ORIGIN: attribution.sourceProduct,
+    ...(attribution.odDeviceId
+      ? { OPEN_DESIGN_AMR_DEVICE_ID: attribution.odDeviceId }
+      : {}),
   };
 }
 
@@ -556,6 +753,38 @@ function buildAmrEntryAnalyticsCommon(
     registryKey: 'open_design_amr_entry',
     eventName: 'amr_entry',
     eventType: 'click',
+    platform: 'web',
+    env: resolveAmrAnalyticsEnv(deps.env ?? process.env),
+    userId: null,
+    anonymousId,
+    sessionId,
+    appVersion: deps.appVersion ?? null,
+    locale: context?.locale?.trim() || null,
+    timezone: null,
+    deviceType: null,
+    browser: null,
+    os: null,
+    arch: null,
+    cliVersion: null,
+    traceId: payload.entryId,
+    walletBalance: null,
+  };
+}
+
+function buildAmrOnboardingProfileAnalyticsCommon(
+  payload: AmrOnboardingProfileAnalyticsPayload,
+  deps: MirrorAmrEntryAnalyticsDeps,
+) {
+  const context = deps.analyticsContext ?? null;
+  const anonymousId =
+    context?.deviceId?.trim() || payload.odDeviceId || payload.entryId;
+  const sessionId = context?.sessionId?.trim() || payload.entryId;
+  return {
+    eventId: `od-onboarding-profile-${payload.entryId}`,
+    eventTime: payload.profileOccurredAt,
+    registryKey: 'open_design_onboarding_profile',
+    eventName: 'onboarding_profile',
+    eventType: 'result',
     platform: 'web',
     env: resolveAmrAnalyticsEnv(deps.env ?? process.env),
     userId: null,

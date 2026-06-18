@@ -317,7 +317,7 @@ describe('buildTracePayload', () => {
     expect(write.output).toBe('[REDACTED:tool_output:content_tool:Write]');
   });
 
-  it('adds prompt-stack metadata to trace and generation without replacing user prompt input', () => {
+  it('adds full prompt-stack content once on generation input and flat metadata elsewhere', () => {
     const promptTelemetry = buildPromptStackTelemetry({
       composedPrompt:
         '# Instructions\n\nWork in /Users/alice/project\n\n---\n# User request\n\nBuild a card',
@@ -356,19 +356,106 @@ describe('buildTracePayload', () => {
         }),
       ],
     });
-    expect(trace.metadata.promptStack).toMatchObject({
-      redactionVersion: 'prompt-stack-redaction-v1',
-      sectionCount: 3,
-    });
-    expect(generation.metadata.promptStack).toEqual(trace.metadata.promptStack);
-    expect(trace.metadata.promptStack.sections[0].redactedContent).toContain(
-      '[REDACTED:path]',
-    );
-    expect(trace.metadata.promptStack.sections[2].redactedContent).toBeUndefined();
+    expect(trace.metadata.promptStack).toBeUndefined();
+    expect(generation.metadata.promptStack).toBeUndefined();
     expect(trace.metadata.promptStack_section_daemonSystemPrompt_present).toBeUndefined();
     expect(trace.metadata.promptStack_section_attachments_present).toBeUndefined();
     expect(trace.metadata.promptStack_section_daemonSystemPrompt_rawBytes).toBeUndefined();
     expect(trace.metadata.promptStack_promptFingerprint).toMatch(/^sha256:/);
+    expect(generation.metadata.promptStack_promptFingerprint).toBe(
+      trace.metadata.promptStack_promptFingerprint,
+    );
+  });
+
+  it('adds prompt-stack byte and cache-token blame metadata for TTFT diagnosis', () => {
+    const promptTelemetry = buildPromptStackTelemetry({
+      composedPrompt: ['a'.repeat(1000), 'b'.repeat(500), 'c'.repeat(100)].join('\n'),
+      sections: [
+        { kind: 'daemonSystemPrompt', content: 'a'.repeat(1000) },
+        { kind: 'pluginStagePrompt', content: 'b'.repeat(500) },
+        { kind: 'userRequest', content: 'c'.repeat(100) },
+      ],
+    });
+    const ctx = makeCtx({
+      prefs: { metrics: true, content: true, artifactManifest: false },
+      promptTelemetry,
+    });
+    ctx.run = {
+      ...ctx.run,
+      timings: {
+        tool_call_count: 0,
+        total_duration_ms: 89_162,
+        time_to_first_token_ms: 26_613,
+        spawn_to_first_token_ms: 26_491,
+      },
+    };
+
+    const batch = buildTracePayload(ctx);
+    const trace = bodyOf(batch, 'trace-create');
+    const generation = bodyOf(batch, 'generation-create', 'llm');
+
+    expect(trace.metadata.promptStack_topSectionsByBytes).toEqual([
+      expect.objectContaining({
+        kind: 'daemonSystemPrompt',
+        rawBytes: 1000,
+        redactedBytes: 1000,
+        attributionBytes: 1000,
+        attributionShare: 0.625,
+        estimatedInputEffectiveTokens: 929,
+        estimatedCacheCreationInputTokens: 32,
+        estimatedCacheReadInputTokens: 126,
+        estimatedUncachedInputTokens: 772,
+      }),
+      expect.objectContaining({
+        kind: 'pluginStagePrompt',
+        rawBytes: 500,
+        attributionShare: 0.3125,
+        estimatedCacheCreationInputTokens: 15,
+      }),
+      expect.objectContaining({
+        kind: 'userRequest',
+        rawBytes: 100,
+        attributionShare: 0.0625,
+        estimatedCacheCreationInputTokens: 3,
+      }),
+    ]);
+    expect(trace.metadata.cacheCreationTokensBySection).toEqual([
+      {
+        kind: 'daemonSystemPrompt',
+        ordinal: 0,
+        attributionBytes: 1000,
+        estimatedCacheCreationInputTokens: 32,
+      },
+      {
+        kind: 'pluginStagePrompt',
+        ordinal: 1,
+        attributionBytes: 500,
+        estimatedCacheCreationInputTokens: 15,
+      },
+      {
+        kind: 'userRequest',
+        ordinal: 2,
+        attributionBytes: 100,
+        estimatedCacheCreationInputTokens: 3,
+      },
+    ]);
+    expect(trace.metadata.promptStack_ttftAttribution).toMatchObject({
+      method: 'proportional_by_prompt_section_redacted_bytes',
+      time_to_first_token_ms: 26_613,
+      spawn_to_first_token_ms: 26_491,
+      totalAttributionBytes: 1600,
+      sectionCount: 3,
+      primarySectionKind: 'daemonSystemPrompt',
+      primarySectionAttributionShare: 0.625,
+      primarySectionEstimatedCacheCreationInputTokens: 32,
+      cacheTokenSource: 'anthropic',
+    });
+    expect(generation.metadata.promptStack_topSectionsByBytes).toEqual(
+      trace.metadata.promptStack_topSectionsByBytes,
+    );
+    expect(generation.metadata.promptStack_ttftAttribution).toEqual(
+      trace.metadata.promptStack_ttftAttribution,
+    );
   });
 
   it('omits prompt-stack redactedContent when metrics or content consent is off', () => {
@@ -385,8 +472,8 @@ describe('buildTracePayload', () => {
       const trace = bodyOf(batch, 'trace-create');
       const generation = bodyOf(batch, 'generation-create', 'llm');
       expect(trace.input).toBeUndefined();
-      expect(trace.metadata.promptStack.sections[0].redactedContent).toBeUndefined();
-      expect(trace.metadata.promptStack.redactedContentBytes).toBe(0);
+      expect(trace.metadata.promptStack).toBeUndefined();
+      expect(trace.metadata.promptStack_redactedContentBytes).toBe(0);
       expect(generation.input).toMatchObject({
         type: 'open-design.prompt-stack',
         redactedContentBytes: 0,
@@ -395,9 +482,9 @@ describe('buildTracePayload', () => {
     }
   });
 
-  it('truncates ASCII prompt at 8 KB and output at 16 KB (bytes == chars)', () => {
-    const longPrompt = 'a'.repeat(20_000);
-    const longOutput = 'b'.repeat(40_000);
+  it('truncates ASCII prompt and output at 64 KB (bytes == chars)', () => {
+    const longPrompt = 'a'.repeat(80_000);
+    const longOutput = 'b'.repeat(80_000);
     const batch = buildTracePayload(
       makeCtx({
         message: {
@@ -409,16 +496,16 @@ describe('buildTracePayload', () => {
       }),
     );
     const trace = (batch[0] as any).body;
-    expect(Buffer.byteLength(trace.input, 'utf8')).toBe(8 * 1024);
-    expect(Buffer.byteLength(trace.output, 'utf8')).toBe(16 * 1024);
+    expect(Buffer.byteLength(trace.input, 'utf8')).toBe(64 * 1024);
+    expect(Buffer.byteLength(trace.output, 'utf8')).toBe(64 * 1024);
   });
 
   it('truncates by UTF-8 bytes, not by JS string length, for multi-byte text', () => {
     // Each CJK character is 3 bytes in UTF-8 but 1 unit in String.length.
-    // 4096 chars × 3 bytes = 12_288 bytes, well over the 8 KB input cap.
-    const longCJK = '设'.repeat(4096);
-    expect(longCJK.length).toBe(4096);
-    expect(Buffer.byteLength(longCJK, 'utf8')).toBe(12_288);
+    // 30_000 chars × 3 bytes = 90_000 bytes, well over the 64 KB input cap.
+    const longCJK = '设'.repeat(30_000);
+    expect(longCJK.length).toBe(30_000);
+    expect(Buffer.byteLength(longCJK, 'utf8')).toBe(90_000);
     const batch = buildTracePayload(
       makeCtx({
         message: { messageId: 'msg-1', prompt: longCJK, output: '' },
@@ -426,7 +513,7 @@ describe('buildTracePayload', () => {
       }),
     );
     const trace = (batch[0] as any).body;
-    expect(Buffer.byteLength(trace.input, 'utf8')).toBeLessThanOrEqual(8 * 1024);
+    expect(Buffer.byteLength(trace.input, 'utf8')).toBeLessThanOrEqual(64 * 1024);
     // Boundary safety: the trimmed result must still be valid UTF-8 (no
     // half-encoded characters). Round-tripping through Buffer should be
     // lossless if the cut landed correctly.
@@ -498,10 +585,10 @@ describe('buildTracePayload', () => {
     expect(trace.metadata.manifest_completeness).toBeUndefined();
   });
 
-  it('includes trace-safe object manifests when the artifact manifest gate is on', () => {
+  it('includes trace-safe object manifests when content telemetry is on', () => {
     const batch = buildTracePayload(
       makeCtx({
-        prefs: { metrics: true, content: false, artifactManifest: true },
+        prefs: { metrics: true, content: true },
         attachmentManifest: [
           {
             attachment_id: 'att-1',
@@ -593,7 +680,7 @@ describe('buildTracePayload', () => {
     const batch = buildTracePayload(
       makeCtx({
         artifacts: many,
-        prefs: { metrics: true, content: false, artifactManifest: true },
+        prefs: { metrics: true, content: true },
       }),
     );
     const trace = (batch[0] as any).body;
@@ -626,7 +713,7 @@ describe('buildTracePayload', () => {
       makeCtx({
         artifactManifest: many,
         manifestCompleteness: 'complete',
-        prefs: { metrics: true, content: false, artifactManifest: true },
+        prefs: { metrics: true, content: true },
       }),
     );
     const trace = (batch[0] as any).body;
@@ -661,7 +748,7 @@ describe('buildTracePayload', () => {
       makeCtx({
         attachmentManifest: many,
         manifestCompleteness: 'complete',
-        prefs: { metrics: true, content: false, artifactManifest: true },
+        prefs: { metrics: true, content: true },
         run: {
           runId: 'run-1',
           status: 'succeeded',
@@ -1072,33 +1159,14 @@ describe('buildTracePayload', () => {
       },
       output: {
         status: 'prompt_stack_ready',
-        content_policy: 'redacted_prompt_stack_inline_with_object_refs',
+        content_policy: 'redacted_prompt_stack_on_generation_input_with_object_refs',
         prompt_stack_available: true,
         section_count: 3,
-        prompt_stack: {
-          type: 'open-design.prompt-stack',
-          sectionCount: 3,
-          sections: [
-            expect.objectContaining({
-              kind: 'daemonSystemPrompt',
-              redactedContent: expect.stringContaining('[REDACTED:path]'),
-            }),
-            expect.objectContaining({
-              kind: 'userRequest',
-              redactedContent: 'Build the card',
-            }),
-            expect.objectContaining({
-              kind: 'attachments',
-              contentMode: 'metadata-only',
-              metadata: expect.objectContaining({
-                count: 1,
-              }),
-            }),
-          ],
-        },
+        stack_fingerprint: expect.stringMatching(/^sha256:/),
       },
     });
     expect(bodyOf(batch, 'span-create', 'prompt-build').input.prompt_stack).toBeUndefined();
+    expect(bodyOf(batch, 'span-create', 'prompt-build').output.prompt_stack).toBeUndefined();
     expect(bodyOf(batch, 'span-create', 'spawn')).toMatchObject({
       id: 'run-spans-phase-spawn',
       parentObservationId: 'run-spans-gen',
@@ -1466,7 +1534,7 @@ describe('reportRunCompleted', () => {
     const fetchSpy = vi.fn();
     const result = await reportRunCompleted(
       makeCtx({
-        prefs: { metrics: true, content: false, artifactManifest: true },
+        prefs: { metrics: true, content: false },
       }),
       { config: TEST_CONFIG, fetchImpl: fetchSpy as any },
     );
@@ -1527,6 +1595,46 @@ describe('reportRunCompleted', () => {
       'span-create',
       'span-create',
     ]);
+    expect(result).toEqual({
+      langfuse_expected: true,
+      langfuse_delivery_status: 'accepted',
+    });
+  });
+
+  it('keeps a max-budget prompt stack under the hard batch cap', async () => {
+    const maxBudgetSection = 'x'.repeat(64 * 1024);
+    const promptTelemetry = buildPromptStackTelemetry({
+      composedPrompt: maxBudgetSection.repeat(8),
+      sections: [
+        { kind: 'daemonSystemPrompt', content: maxBudgetSection.repeat(2) },
+        { kind: 'runtimeToolPrompt', content: maxBudgetSection },
+        { kind: 'clientSystemPrompt', content: maxBudgetSection },
+        { kind: 'skillPrompt', content: maxBudgetSection },
+        { kind: 'designSystemPrompt', content: maxBudgetSection },
+        { kind: 'pluginStagePrompt', content: maxBudgetSection },
+        { kind: 'researchCommandContract', content: maxBudgetSection },
+      ],
+    });
+    expect(promptTelemetry.redactedContentBytes).toBe(512 * 1024);
+
+    const fetchSpy = vi.fn().mockResolvedValue(
+      new Response('{}', { status: 200 }),
+    );
+    const result = await reportRunCompleted(
+      makeCtx({
+        prefs: { metrics: true, content: true, artifactManifest: false },
+        promptTelemetry,
+      }),
+      {
+        config: TEST_CONFIG,
+        fetchImpl: fetchSpy as any,
+      },
+    );
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const init = fetchSpy.mock.calls[0]![1] as RequestInit;
+    const serialized = init.body as string;
+    expect(Buffer.byteLength(serialized, 'utf8')).toBeLessThan(1024 * 1024);
     expect(result).toEqual({
       langfuse_expected: true,
       langfuse_delivery_status: 'accepted',

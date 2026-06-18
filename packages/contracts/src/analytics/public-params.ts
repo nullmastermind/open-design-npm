@@ -15,6 +15,7 @@ export interface AnalyticsPublicParams {
   event_id: string;
   request_id?: string;
   event_schema_version: number;
+  env: string;
   ui_version: string;
   session_id: string;
   // v2 rename: was `anonymous_id` in schema v1. The value is still the
@@ -35,6 +36,10 @@ export type TrackingConfigureType =
   | 'local_cli'
   | 'byok'
   | 'both'
+  // AMR sign-in is the user's only configured generation path — no local
+  // CLI detected and no BYOK key saved. Counts toward the "configured"
+  // funnel stage alongside local_cli/byok/both.
+  | 'amr'
   | 'none'
   | 'unknown';
 
@@ -47,6 +52,26 @@ export interface AnalyticsConfigureGlobals {
   has_available_configure_cli: boolean;
   configure_type: TrackingConfigureType;
   configure_availability: TrackingConfigureAvailability;
+  // Per-path "reached a runnable/usable state" flags. Unlike `configure_type`
+  // — a single priority cascade (both > local_cli > byok > amr) where a value
+  // masks the lower-priority paths — these three are INDEPENDENT booleans, so
+  // a user with both a CLI and a saved BYOK key reports `cli_runnable: true`
+  // AND `byok_runnable: true`. Dashboards split per-path activation off these
+  // without the cascade undercounting AMR/BYOK whenever a CLI is also present.
+  //
+  // `cli_runnable` is intentionally the same signal as
+  // `has_available_configure_cli` (an installed, available non-AMR CLI); it is
+  // restated here only to give the runnable-trio a symmetric shape.
+  //
+  // Caveat for dashboards: these flag a *runnable state*, not an active
+  // configuration action. `cli_runnable` in particular fires when a coding CLI
+  // is merely detected on PATH (common for our dev audience), so it overstates
+  // "the user configured something". For "actively configured & succeeded",
+  // count the success result events instead — `settings_cli_test_result`,
+  // `settings_byok_test_result`, `amr_auth_result` with `result: 'success'`.
+  cli_runnable: boolean;
+  byok_runnable: boolean;
+  amr_runnable: boolean;
 }
 
 // Wire format used between web and daemon to bridge identity. Web sets these
@@ -80,6 +105,7 @@ export const ANALYTICS_HEADER_REQUEST_ID = 'x-od-analytics-request-id';
 //   identity PostHog already saw on prior runs.
 export interface AnalyticsConfigResponse {
   enabled: boolean;
+  env: string;
   key: string | null;
   host: string | null;
   installationId?: string | null;

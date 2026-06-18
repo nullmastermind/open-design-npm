@@ -10,9 +10,9 @@
 // Privacy gates are layered: `prefs.metrics` is the master switch, and
 // `prefs.content` is required for Langfuse traces because this sink is used
 // for turn-quality evals. If either is off, no network call is made.
-// `prefs.artifactManifest` decides whether the produced-files manifest is
-// included. None of these defaults to true; the Web onboarding flow flips
-// metrics + content after explicit consent.
+// Complete-context manifests are part of content telemetry: when metrics and
+// content are both enabled, Langfuse receives the trace and associated object
+// references. If either is off, no network call is made.
 //
 // See: specs/change/20260507-langfuse-telemetry/spec.md
 
@@ -23,6 +23,7 @@ import {
   buildPromptStackFlatMetadata,
   promptStackWithoutContent,
   structuredPromptStackInput,
+  type PromptTelemetrySection,
   type PromptStackTelemetry,
 } from './prompt-telemetry.js';
 import type {
@@ -30,6 +31,7 @@ import type {
   RunTimingAnalytics,
 } from './run-analytics-observability.js';
 import type { RunFailureClassification } from './run-failure-classification.js';
+import { readTelemetryEnvironment } from './telemetry-environment.js';
 
 // Langfuse US region: confirmed by an end-to-end smoke on 2026-05-07 — the
 // project's keys authenticate against `us.cloud.langfuse.com` only. EU host
@@ -37,15 +39,16 @@ import type { RunFailureClassification } from './run-failure-classification.js';
 // See specs/change/20260507-langfuse-telemetry/spec.md Q3.
 const DEFAULT_BASE_URL = 'https://us.cloud.langfuse.com';
 
-const INPUT_MAX_BYTES = 8 * 1024;
-const OUTPUT_MAX_BYTES = 16 * 1024;
-const TOOL_INPUT_MAX_BYTES = 4 * 1024;
-const TOOL_OUTPUT_MAX_BYTES = 4 * 1024;
+export const INPUT_MAX_BYTES = 64 * 1024;
+const OUTPUT_MAX_BYTES = 64 * 1024;
+const TOOL_INPUT_MAX_BYTES = 8 * 1024;
+const TOOL_OUTPUT_MAX_BYTES = 8 * 1024;
 const ARTIFACTS_MAX_ITEMS = 50;
 const SESSION_ID_MAX = 200; // Langfuse drops sessionIds longer than this.
 const HARD_BATCH_MAX_BYTES = 1024 * 1024;
 const DEFAULT_FETCH_TIMEOUT_MS = 20_000;
 const DEFAULT_FETCH_RETRIES = 1;
+const PROMPT_STACK_BLAME_MAX_SECTIONS = 8;
 let missingTelemetrySinkWarned = false;
 
 export interface LangfuseConfig {
@@ -105,6 +108,12 @@ export interface RunSummary {
     lineCount: number;
     truncated: boolean;
   };
+  stdout?: {
+    tail: string;
+    lineCount: number;
+    truncated: boolean;
+  };
+  diagnostics?: unknown;
 }
 
 export interface MessageSummary {
@@ -144,12 +153,13 @@ export type ObjectManifestAccessScope = 'owner' | 'project' | 'workspace' | 'eva
 
 export type ObjectManifestRetentionPolicy =
   | 'ephemeral'
+  | 'observability_90d'
   | 'project_lifetime'
   | 'eval_fixture'
   | 'legal_hold';
 
 export interface TraceSafeObjectManifestBase {
-  object_class: 'attachment' | 'artifact';
+  object_class: 'attachment' | 'artifact' | 'input_text_snapshot';
   storage_ref: string;
   status: ObjectManifestStatus;
   reason?: string;
@@ -166,9 +176,12 @@ export interface TraceSafeObjectManifestBase {
   retention_policy: ObjectManifestRetentionPolicy;
   access_scope: ObjectManifestAccessScope;
   sensitivity: ObjectManifestSensitivity;
-  source: 'user_upload' | 'agent_generated';
+  source: 'user_upload' | 'agent_generated' | 'user_prompt';
   expires_at: string | null;
   approved_by: string | null;
+  open_in_open_design_url?: null;
+  preview_status?: string;
+  access_policy?: 'open_design_auth_required';
 }
 
 export interface AttachmentManifestEntry extends TraceSafeObjectManifestBase {
@@ -184,6 +197,12 @@ export interface ArtifactManifestEntry extends TraceSafeObjectManifestBase {
   build_status?: string;
   preview_status?: string;
   export_status?: string;
+}
+
+export interface InputTextSnapshotManifestEntry extends TraceSafeObjectManifestBase {
+  object_class: 'input_text_snapshot';
+  input_text_snapshot_id: string;
+  type: 'text';
 }
 
 export interface ToolCallSummary {
@@ -253,6 +272,7 @@ export interface ReportContext {
   artifacts: ArtifactSummary[];
   attachmentManifest?: AttachmentManifestEntry[];
   artifactManifest?: ArtifactManifestEntry[];
+  inputTextSnapshotManifest?: InputTextSnapshotManifestEntry[];
   manifestCompleteness?: ObjectManifestCompleteness;
   tools?: ToolCallSummary[];
   agentEvents?: AgentEventSummary[];
@@ -613,6 +633,140 @@ function buildCostBreakdown(ctx: ReportContext): Record<string, unknown> {
   };
 }
 
+function cleanNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function sectionAttributionBytes(section: PromptTelemetrySection): number {
+  return cleanNumber(section.redactedBytes) ?? cleanNumber(section.rawBytes) ?? 0;
+}
+
+function redactedContentBytes(section: PromptTelemetrySection): number {
+  return Buffer.byteLength(section.redactedContent ?? '', 'utf8');
+}
+
+function allocateProportionalTokens(
+  total: number | undefined,
+  sections: Array<{ section: PromptTelemetrySection; weightBytes: number }>,
+): Map<PromptTelemetrySection, number> {
+  const out = new Map<PromptTelemetrySection, number>();
+  const cleanTotal = cleanNumber(total);
+  if (cleanTotal === undefined || cleanTotal <= 0) return out;
+  const totalWeight = sections.reduce((sum, item) => sum + item.weightBytes, 0);
+  if (totalWeight <= 0) return out;
+
+  let assigned = 0;
+  let largest: { section: PromptTelemetrySection; tokens: number } | null = null;
+  for (const item of sections) {
+    const exact = (cleanTotal * item.weightBytes) / totalWeight;
+    const rounded = Math.floor(exact);
+    out.set(item.section, rounded);
+    assigned += rounded;
+    if (!largest || item.weightBytes > sectionAttributionBytes(largest.section)) {
+      largest = { section: item.section, tokens: rounded };
+    }
+  }
+  const remainder = Math.round(cleanTotal) - assigned;
+  if (largest && remainder > 0) {
+    out.set(largest.section, (out.get(largest.section) ?? 0) + remainder);
+  }
+  return out;
+}
+
+function buildPromptStackBlameMetadata(
+  promptStack: PromptStackTelemetry | undefined,
+  usage: MessageSummary['usage'] | undefined,
+  timings: RunTimingAnalytics | undefined,
+): Record<string, unknown> {
+  if (!promptStack || promptStack.sections.length === 0) return {};
+  const weightedSections = promptStack.sections
+    .map((section) => ({
+      section,
+      weightBytes: sectionAttributionBytes(section),
+    }))
+    .filter((item) => item.weightBytes > 0);
+  if (weightedSections.length === 0) return {};
+
+  const totalBytes = weightedSections.reduce((sum, item) => sum + item.weightBytes, 0);
+  const sorted = [...weightedSections].sort(
+    (a, b) => b.weightBytes - a.weightBytes || a.section.ordinal - b.section.ordinal,
+  );
+  const cacheCreationBySection = allocateProportionalTokens(
+    usage?.cacheCreationInputTokens,
+    weightedSections,
+  );
+  const cacheReadBySection = allocateProportionalTokens(
+    usage?.cacheReadInputTokens,
+    weightedSections,
+  );
+  const inputEffectiveBySection = allocateProportionalTokens(
+    usage?.inputTokensEffective ?? usage?.inputTokens,
+    weightedSections,
+  );
+  const uncachedBySection = allocateProportionalTokens(
+    usage?.uncachedInputTokens,
+    weightedSections,
+  );
+
+  const sectionRow = ({ section, weightBytes }: { section: PromptTelemetrySection; weightBytes: number }) => {
+    const share = totalBytes > 0 ? weightBytes / totalBytes : 0;
+    return {
+      kind: section.kind,
+      ordinal: section.ordinal,
+      contentMode: section.contentMode,
+      rawBytes: section.rawBytes,
+      redactedBytes: section.redactedBytes,
+      redactedContentBytes: redactedContentBytes(section),
+      attributionBytes: weightBytes,
+      attributionShare: Number(share.toFixed(6)),
+      truncated: section.truncated,
+      ...(section.truncationReason ? { truncationReason: section.truncationReason } : {}),
+      estimatedInputEffectiveTokens: inputEffectiveBySection.get(section) ?? undefined,
+      estimatedCacheCreationInputTokens: cacheCreationBySection.get(section) ?? undefined,
+      estimatedCacheReadInputTokens: cacheReadBySection.get(section) ?? undefined,
+      estimatedUncachedInputTokens: uncachedBySection.get(section) ?? undefined,
+    };
+  };
+
+  const primary = sorted[0]!;
+  const primaryShare = totalBytes > 0 ? primary.weightBytes / totalBytes : 0;
+  return {
+    promptStack_topSectionsByBytes: sorted
+      .slice(0, PROMPT_STACK_BLAME_MAX_SECTIONS)
+      .map(sectionRow),
+    cacheCreationTokensBySection: sorted
+      .filter(({ section }) => (cacheCreationBySection.get(section) ?? 0) > 0)
+      .map(({ section, weightBytes }) => ({
+        kind: section.kind,
+        ordinal: section.ordinal,
+        attributionBytes: weightBytes,
+        estimatedCacheCreationInputTokens: cacheCreationBySection.get(section) ?? 0,
+      })),
+    promptStack_ttftAttribution: {
+      method: 'proportional_by_prompt_section_redacted_bytes',
+      estimation_warning:
+        'Provider reports aggregate prompt/cache tokens only; section token values are estimates for diagnosis, not billing truth.',
+      time_to_first_token_ms: timings?.time_to_first_token_ms,
+      spawn_to_first_token_ms: timings?.spawn_to_first_token_ms,
+      totalAttributionBytes: totalBytes,
+      sectionCount: weightedSections.length,
+      primarySectionKind: primary.section.kind,
+      primarySectionOrdinal: primary.section.ordinal,
+      primarySectionAttributionBytes: primary.weightBytes,
+      primarySectionAttributionShare: Number(primaryShare.toFixed(6)),
+      primarySectionEstimatedInputEffectiveTokens:
+        inputEffectiveBySection.get(primary.section) ?? undefined,
+      primarySectionEstimatedCacheCreationInputTokens:
+        cacheCreationBySection.get(primary.section) ?? undefined,
+      primarySectionEstimatedCacheReadInputTokens:
+        cacheReadBySection.get(primary.section) ?? undefined,
+      cacheTokenSource: usage?.cacheTokenSource,
+    },
+  };
+}
+
 function durationMs(startedAt: number, endedAt: number): number {
   return Math.max(0, Math.round(endedAt - startedAt));
 }
@@ -834,12 +988,9 @@ function buildTimingSpanBodies(
             ? 'unmeasured'
             : 'prompt_stack_ready',
         content_policy: opts.promptStack
-          ? 'redacted_prompt_stack_inline_with_object_refs'
+          ? 'redacted_prompt_stack_on_generation_input_with_object_refs'
           : 'metadata_only_or_unavailable',
         ...promptBuildSummary(ctx.promptTelemetry),
-        prompt_stack: opts.promptStack
-          ? structuredPromptStackInput(opts.promptStack)
-          : undefined,
       },
       metadata: { boundary: 'promptBuildStartAt -> promptBuildEndAt' },
     },
@@ -908,14 +1059,15 @@ function buildTimingSpanBodies(
       end: runEnd,
       input: {
         phase: 'finalize',
-        artifact_manifest_enabled: ctx.prefs.artifactManifest === true,
+        artifact_manifest_enabled: ctx.prefs.metrics === true && ctx.prefs.content === true,
       },
       output: {
         status: ctx.run.status,
         artifact_count: ctx.artifacts.length,
         attachment_count: ctx.attachmentManifest?.length ?? 0,
         manifest_completeness:
-          ctx.manifestCompleteness ?? (ctx.prefs.artifactManifest ? 'unavailable' : 'off'),
+          ctx.manifestCompleteness ??
+          (ctx.prefs.metrics === true && ctx.prefs.content === true ? 'unavailable' : 'off'),
       },
       metadata: { boundary: 'finalizeStartAt -> run.endedAt' },
     },
@@ -998,7 +1150,7 @@ function shouldCreateGenerationObservation(ctx: ReportContext): boolean {
 
 export function buildTracePayload(ctx: ReportContext): unknown[] {
   const wantsContent = ctx.prefs.metrics === true && ctx.prefs.content === true;
-  const wantsArtifacts = ctx.prefs.artifactManifest === true;
+  const wantsArtifacts = wantsContent;
 
   const sessionId =
     ctx.conversationId.length <= SESSION_ID_MAX ? ctx.conversationId : undefined;
@@ -1032,6 +1184,12 @@ export function buildTracePayload(ctx: ReportContext): unknown[] {
     : undefined;
   const artifactManifestTruncated = wantsArtifacts
     ? manifestTruncated(ctx.artifactManifest)
+    : undefined;
+  const inputTextSnapshotManifest = wantsArtifacts && wantsContent
+    ? cappedManifestEntries(ctx.inputTextSnapshotManifest)
+    : undefined;
+  const inputTextSnapshotManifestTruncated = wantsArtifacts && wantsContent
+    ? manifestTruncated(ctx.inputTextSnapshotManifest)
     : undefined;
 
   const tokens = ctx.message.usage
@@ -1079,6 +1237,11 @@ export function buildTracePayload(ctx: ReportContext): unknown[] {
   const promptStackFlatMetadata = promptStack
     ? buildPromptStackFlatMetadata(promptStack)
     : {};
+  const promptStackBlameMetadata = buildPromptStackBlameMetadata(
+    promptStack,
+    ctx.message.usage,
+    ctx.run.timings,
+  );
   const generationInput = promptStack
     ? structuredPromptStackInput(promptStack)
     : inputText;
@@ -1089,6 +1252,7 @@ export function buildTracePayload(ctx: ReportContext): unknown[] {
   // keys best). All entries are anonymous — no PII, no credentials.
   const traceMetadata: Record<string, unknown> = {
     success,
+    env: readTelemetryEnvironment(),
     status: ctx.run.status,
     error: ctx.run.error ?? undefined,
     error_code: ctx.run.errorCode,
@@ -1097,6 +1261,8 @@ export function buildTracePayload(ctx: ReportContext): unknown[] {
     ...(ctx.run.failure ?? {}),
     ...(ctx.run.timings ?? {}),
     stderr: ctx.run.stderr,
+    stdout: ctx.run.stdout,
+    diagnostics: ctx.run.diagnostics,
     eventsSummary: ctx.eventsSummary,
     tokens,
     cost_usd: costBreakdown.cost_usd,
@@ -1112,6 +1278,8 @@ export function buildTracePayload(ctx: ReportContext): unknown[] {
     attachment_manifest_truncated: attachmentManifestTruncated,
     artifact_manifest: artifactManifest,
     artifact_manifest_truncated: artifactManifestTruncated,
+    input_text_snapshot_manifest: inputTextSnapshotManifest,
+    input_text_snapshot_manifest_truncated: inputTextSnapshotManifestTruncated,
     manifest_completeness: wantsArtifacts
       ? (ctx.manifestCompleteness ?? 'unavailable')
       : undefined,
@@ -1129,8 +1297,8 @@ export function buildTracePayload(ctx: ReportContext): unknown[] {
     osRelease: ctx.runtime?.osRelease,
     arch: ctx.runtime?.arch,
     clientType: ctx.runtime?.clientType,
-    promptStack,
     ...promptStackFlatMetadata,
+    ...promptStackBlameMetadata,
   };
 
   // Generation-level model parameters mirror the Langfuse schema so the UI
@@ -1223,8 +1391,8 @@ export function buildTracePayload(ctx: ReportContext): unknown[] {
           cost_source: costBreakdown.cost_source,
           cost_breakdown: costBreakdown,
           performance_diagnostics: performanceDiagnostics,
-          promptStack,
           ...promptStackFlatMetadata,
+          ...promptStackBlameMetadata,
         },
       },
     });
@@ -1252,8 +1420,8 @@ export function buildTracePayload(ctx: ReportContext): unknown[] {
           cost_source: costBreakdown.cost_source,
           cost_breakdown: costBreakdown,
           performance_diagnostics: performanceDiagnostics,
-          promptStack,
           ...promptStackFlatMetadata,
+          ...promptStackBlameMetadata,
           reason: 'no_model_generation',
         },
       },

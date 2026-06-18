@@ -23,6 +23,9 @@ const BOOT_DEFAULTS = {
   has_available_configure_cli: false,
   configure_type: 'unknown' as const,
   configure_availability: 'unknown' as const,
+  cli_runnable: false,
+  byok_runnable: false,
+  amr_runnable: false,
 };
 
 describe('deriveConfigureGlobals', () => {
@@ -31,6 +34,9 @@ describe('deriveConfigureGlobals', () => {
       has_available_configure_cli: false,
       configure_type: 'none',
       configure_availability: 'unknown',
+      cli_runnable: false,
+      byok_runnable: false,
+      amr_runnable: false,
     });
   });
 
@@ -47,6 +53,9 @@ describe('deriveConfigureGlobals', () => {
       has_available_configure_cli: true,
       configure_type: 'local_cli',
       configure_availability: 'available',
+      cli_runnable: true,
+      byok_runnable: false,
+      amr_runnable: false,
     });
   });
 
@@ -76,6 +85,9 @@ describe('deriveConfigureGlobals', () => {
       has_available_configure_cli: false,
       configure_type: 'byok',
       configure_availability: 'available',
+      cli_runnable: false,
+      byok_runnable: true,
+      amr_runnable: false,
     });
   });
 
@@ -104,13 +116,21 @@ describe('deriveConfigureGlobals — cold-start gating', () => {
   // for the empty-agents / partial-config inputs so a future caller
   // can't silently skip the gate again.
 
-  it('reports unavailable / local_cli when daemon mode is pinned but no agents are loaded yet', () => {
+  it('reports unavailable / none when daemon mode is pinned but no agents are loaded yet', () => {
+    // Pre-amr_auth_result, the daemon branch hardcoded 'local_cli', which
+    // made 'none' unreachable on desktop. The type now follows the actual
+    // configured state; App.tsx's agentsLoading gate still keeps the boot
+    // 'unknown' in place until the probe lands, so this input shape only
+    // reaches the helper for machines that genuinely have no CLI.
     expect(
       deriveConfigureGlobals({ mode: 'daemon', agentId: 'claude', agents: [] }),
     ).toEqual({
       has_available_configure_cli: false,
-      configure_type: 'local_cli',
+      configure_type: 'none',
       configure_availability: 'unavailable',
+      cli_runnable: false,
+      byok_runnable: false,
+      amr_runnable: false,
     });
   });
 
@@ -125,6 +145,9 @@ describe('deriveConfigureGlobals — cold-start gating', () => {
       has_available_configure_cli: true,
       configure_type: 'local_cli',
       configure_availability: 'available',
+      cli_runnable: true,
+      byok_runnable: false,
+      amr_runnable: false,
     });
   });
 
@@ -158,6 +181,130 @@ describe('deriveConfigureGlobals — cold-start gating', () => {
       has_available_configure_cli: true,
       configure_type: 'local_cli',
       configure_availability: 'unavailable',
+      cli_runnable: true,
+      byok_runnable: false,
+      amr_runnable: false,
+    });
+  });
+});
+
+describe('deriveConfigureGlobals — AMR', () => {
+  // AMR ships with the app, so its agent row counting as a "local CLI"
+  // would put every install in the local_cli bucket and make the
+  // amr/none buckets unreachable. Sign-in (`amrAuthorized`) is AMR's
+  // configured signal.
+  it('does not count the bundled amr agent as an available local CLI', () => {
+    expect(
+      deriveConfigureGlobals({
+        mode: 'daemon',
+        agentId: 'amr',
+        agents: [{ id: 'amr', available: true }],
+      }),
+    ).toEqual({
+      has_available_configure_cli: false,
+      configure_type: 'none',
+      configure_availability: 'available',
+      cli_runnable: false,
+      byok_runnable: false,
+      amr_runnable: false,
+    });
+  });
+
+  it('reports amr when sign-in is the only configured path', () => {
+    expect(
+      deriveConfigureGlobals({
+        mode: 'daemon',
+        agentId: 'amr',
+        agents: [{ id: 'amr', available: true }],
+        amrAuthorized: true,
+      }),
+    ).toEqual({
+      has_available_configure_cli: false,
+      configure_type: 'amr',
+      configure_availability: 'available',
+      cli_runnable: false,
+      byok_runnable: false,
+      amr_runnable: true,
+    });
+  });
+
+  it('keeps local_cli precedence when a real CLI is installed alongside AMR auth', () => {
+    expect(
+      deriveConfigureGlobals({
+        mode: 'daemon',
+        agentId: 'claude',
+        agents: [
+          { id: 'claude', available: true },
+          { id: 'amr', available: true },
+        ],
+        amrAuthorized: true,
+      }),
+    ).toMatchObject({
+      has_available_configure_cli: true,
+      configure_type: 'local_cli',
+    });
+  });
+
+  it('reports amr / available with no mode pinned when only AMR is authorized', () => {
+    expect(
+      deriveConfigureGlobals({ amrAuthorized: true })).toEqual({
+      has_available_configure_cli: false,
+      configure_type: 'amr',
+      configure_availability: 'available',
+      cli_runnable: false,
+      byok_runnable: false,
+      amr_runnable: true,
+    });
+  });
+});
+
+describe('deriveConfigureGlobals — independent runnable flags', () => {
+  // The whole point of the runnable trio: `configure_type` is a priority
+  // cascade that masks lower-priority paths (CLI + BYOK collapses to 'both',
+  // and AMR never shows when a CLI/BYOK exists), so per-path activation can't
+  // be read off it. `cli_runnable` / `byok_runnable` / `amr_runnable` are
+  // independent, so a fully-configured user lights up all three even while
+  // `configure_type` reports the single cascade winner.
+  it('reports all three runnable flags independently when CLI + BYOK + AMR are all configured', () => {
+    expect(
+      deriveConfigureGlobals({
+        mode: 'daemon',
+        agentId: 'claude',
+        agents: [
+          { id: 'claude', available: true },
+          { id: 'amr', available: true },
+        ],
+        byokConfigured: true,
+        amrAuthorized: true,
+      }),
+    ).toEqual({
+      // cascade winner masks BYOK and AMR …
+      has_available_configure_cli: true,
+      configure_type: 'both',
+      configure_availability: 'available',
+      // … but the independent flags do not.
+      cli_runnable: true,
+      byok_runnable: true,
+      amr_runnable: true,
+    });
+  });
+
+  it('lights up amr_runnable even though configure_type hides AMR behind a CLI', () => {
+    expect(
+      deriveConfigureGlobals({
+        mode: 'daemon',
+        agentId: 'claude',
+        agents: [
+          { id: 'claude', available: true },
+          { id: 'amr', available: true },
+        ],
+        amrAuthorized: true,
+      }),
+    ).toMatchObject({
+      configure_type: 'local_cli',
+      cli_runnable: true,
+      byok_runnable: false,
+      amr_runnable: true,
     });
   });
 });
@@ -177,11 +324,17 @@ describe('setConfigureGlobals (web client)', () => {
       has_available_configure_cli: true,
       configure_type: 'local_cli',
       configure_availability: 'available',
+      cli_runnable: true,
+      byok_runnable: false,
+      amr_runnable: false,
     });
     expect(getConfigureGlobals()).toEqual({
       has_available_configure_cli: true,
       configure_type: 'local_cli',
       configure_availability: 'available',
+      cli_runnable: true,
+      byok_runnable: false,
+      amr_runnable: false,
     });
   });
 
@@ -191,6 +344,9 @@ describe('setConfigureGlobals (web client)', () => {
         has_available_configure_cli: true,
         configure_type: 'both',
         configure_availability: 'available',
+        cli_runnable: true,
+        byok_runnable: true,
+        amr_runnable: false,
       }),
     ).not.toThrow();
   });

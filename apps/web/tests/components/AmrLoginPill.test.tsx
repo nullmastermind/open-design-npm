@@ -38,6 +38,7 @@ const originalFetch = globalThis.fetch;
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
   globalThis.fetch = originalFetch;
   vi.useRealTimers();
 });
@@ -142,7 +143,7 @@ describe('AmrLoginPill', () => {
     expect(screen.queryByText('LOCAL')).toBeNull();
   });
 
-  it('renders a TEST badge next to the signed-out action for the test profile', async () => {
+  it('does not render a profile badge for a signed-out test profile', async () => {
     globalThis.fetch = vi.fn(async () =>
       jsonResponse({
         body: { loggedIn: false, profile: 'test', user: null, configPath: '/x' },
@@ -152,7 +153,7 @@ describe('AmrLoginPill', () => {
     renderPill();
 
     expect(await screen.findByRole('button', { name: 'Sign in' })).toBeTruthy();
-    expect(screen.getByText('TEST')).toBeTruthy();
+    expect(screen.queryByText('TEST')).toBeNull();
   });
 
   it('renders daemon-reported in-flight login attempts as signing-in', async () => {
@@ -174,7 +175,7 @@ describe('AmrLoginPill', () => {
     expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull();
   });
 
-  it('renders a LOCAL badge next to the signed-out action for the local profile', async () => {
+  it('does not render a profile badge for a signed-out local profile', async () => {
     globalThis.fetch = vi.fn(async () =>
       jsonResponse({
         body: { loggedIn: false, profile: 'local', user: null, configPath: '/x' },
@@ -184,7 +185,90 @@ describe('AmrLoginPill', () => {
     renderPill();
 
     expect(await screen.findByRole('button', { name: 'Sign in' })).toBeTruthy();
+    expect(screen.queryByText('LOCAL')).toBeNull();
+  });
+
+  it('uses the test-profile AMR console URL for signed-in users', () => {
+    renderAccountControl({
+      status: 'signed-in',
+      email: 'leaf@example.com',
+      profile: 'test',
+      showProfileBadge: true,
+      showConsoleAction: true,
+    });
+
+    expect(screen.getByText('leaf@example.com')).toBeTruthy();
+    expect(screen.getByText('TEST')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'AMR Console' }).getAttribute('href')).toBe(
+      'https://vela.powerformer.net/wallet?source=open_design',
+    );
+  });
+
+  it('uses the local-profile AMR console URL for signed-in users', () => {
+    renderAccountControl({
+      status: 'signed-in',
+      email: 'leaf@example.com',
+      profile: 'local',
+      showProfileBadge: true,
+      showConsoleAction: true,
+    });
+
     expect(screen.getByText('LOCAL')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'AMR Console' }).getAttribute('href')).toBe(
+      'http://localhost:5173/wallet?source=open_design',
+    );
+  });
+
+  it('uses the production AMR console URL by default', () => {
+    renderAccountControl({
+      status: 'signed-in',
+      email: 'leaf@example.com',
+      profile: 'prod',
+      showProfileBadge: true,
+      showConsoleAction: true,
+    });
+
+    expect(screen.queryByText('PROD')).toBeNull();
+    expect(screen.getByRole('link', { name: 'AMR Console' }).getAttribute('href')).toBe(
+      'https://open-design.ai/amr/wallet?source=open_design',
+    );
+  });
+
+  it('adds Open Design attribution to the signed-in console link on click', () => {
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 202 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(
+      <I18nProvider initial="en">
+        <AmrLoginPill
+          initialStatus={{
+            loggedIn: true,
+            loginInFlight: false,
+            profile: 'prod',
+            configPath: '/x',
+            user: { id: 'u', email: 'leaf@example.com', plan: 'free' },
+          }}
+          skipInitialRefresh
+          showConsoleAction
+          metricsConsent
+          installationId="od-install-abc"
+        />
+      </I18nProvider>,
+    );
+
+    const link = screen.getByRole('link', { name: 'AMR Console' }) as HTMLAnchorElement;
+    fireEvent.click(link);
+
+    const url = new URL(link.href);
+    expect(url.searchParams.get('source')).toBe('open_design');
+    expect(url.searchParams.get('od_origin')).toBe('open_design');
+    expect(url.searchParams.get('od_entry_source')).toBe('settings_amr_console');
+    expect(url.searchParams.get('od_device_id')).toBe('od-install-abc');
+    expect(url.searchParams.get('od_entry_id')).toMatch(/^od-amr-/u);
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/integrations/vela/analytics-entry',
+      expect.objectContaining({ method: 'POST' }),
+    );
   });
 
   it('renders a "Signed in" pill (with the Sign-out aria-label) when /status reports a logged-in user', async () => {
@@ -252,6 +336,65 @@ describe('AmrLoginPill', () => {
         ),
       ).toBe(true);
     });
+  });
+
+  it('passes the Open Design device id in login attribution when metrics consent is enabled', async () => {
+    const fetchMock = vi.fn(async (input, init) => {
+      const url = typeof input === 'string' ? input : (input as URL).toString();
+      if (url.endsWith('/api/integrations/vela/status')) {
+        return jsonResponse({
+          body: { loggedIn: false, profile: 'prod', user: null, configPath: '/x' },
+        });
+      }
+      if (url.endsWith('/api/integrations/vela/analytics-entry')) {
+        return jsonResponse({ status: 202, body: { mirrored: true } });
+      }
+      if (
+        url.endsWith('/api/integrations/vela/login') &&
+        init?.method === 'POST'
+      ) {
+        return jsonResponse({ status: 202, body: { pid: 4242 } });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    render(
+      <I18nProvider initial="en">
+        <AmrLoginPill
+          initialStatus={{
+            loggedIn: false,
+            loginInFlight: false,
+            profile: 'prod',
+            user: null,
+            configPath: '/x',
+          }}
+          skipInitialRefresh
+          amrEntrySourceDetail="settings_amr_authorize"
+          metricsConsent
+          installationId="od-install-abc"
+        />
+      </I18nProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(
+          ([url, init]) =>
+            String(url).endsWith('/api/integrations/vela/login') &&
+            (init as RequestInit | undefined)?.method === 'POST',
+        ),
+      ).toBe(true);
+    });
+    const loginCall = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).endsWith('/api/integrations/vela/login') &&
+        (init as RequestInit | undefined)?.method === 'POST',
+    );
+    const body = JSON.parse(String((loginCall?.[1] as RequestInit).body));
+    expect(body.attribution.sourceDetail).toBe('settings_amr_authorize');
+    expect(body.attribution.odDeviceId).toBe('od-install-abc');
   });
 
   it('shows an AMR error instead of staying in signing-in state when login fails immediately', async () => {
