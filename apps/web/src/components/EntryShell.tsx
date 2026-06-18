@@ -340,6 +340,7 @@ interface Props {
   onOpenLiveArtifact: (projectId: string, artifactId: string) => void;
   onDeleteProject: (id: string) => Promise<boolean | void> | boolean | void;
   onRenameProject: (id: string, name: string) => void;
+  onProjectsRefresh?: () => Promise<void> | void;
   onChangeDefaultDesignSystem: (id: string) => void;
   onCreateDesignSystem?: () => void;
   // NOTE: first-run onboarding intentionally no longer hosts guided
@@ -438,6 +439,7 @@ export function EntryShell({
   onOpenLiveArtifact,
   onDeleteProject,
   onRenameProject,
+  onProjectsRefresh,
   onChangeDefaultDesignSystem,
   onCreateDesignSystem,
   onOpenDesignSystem,
@@ -572,7 +574,10 @@ export function EntryShell({
   // submits now arrive with the hidden od-default router plugin and
   // projectKind='other', so the agent asks for the exact task type
   // before continuing.
-  function handlePluginLoopSubmit(payload: PluginLoopSubmit) {
+  // Forwards onCreateProject's result so HomeView can hold its sending
+  // state until the creation roundtrip settles, and recover on failure
+  // (#4082).
+  function handlePluginLoopSubmit(payload: PluginLoopSubmit): Promise<boolean> | boolean | void {
     const summarizedName = summarizeProjectNameFromPrompt(payload.prompt);
     const head = payload.prompt.trim().split(/\s+/).slice(0, 8).join(' ');
     const firstAttachmentName = payload.attachments?.[0]?.name ?? '';
@@ -608,7 +613,7 @@ export function EntryShell({
         examplePromptBrief: payload.examplePromptContext.brief,
       } : {}),
     };
-    onCreateProject({
+    return onCreateProject({
       name,
       skillId: payload.skillId ?? null,
       designSystemId: payload.designSystemId ?? null,
@@ -790,6 +795,8 @@ export function EntryShell({
                     onDelete={onDeleteProject}
                     onRename={onRenameProject}
                     onNewProject={() => openNewProject()}
+                    onRefresh={onProjectsRefresh}
+                    isActive={view === 'projects'}
                   />
                 </div>
               )}
@@ -1194,9 +1201,9 @@ function OnboardingView({
   // onboarding and remains available from the app surfaces.
   //
   // We do NOT clear on unmount: route changes can remount the shell
-  // during first-run setup. Skip / Back / last-step Continue clear
-  // inline in their respective handlers below; abandoned sessions clear
-  // on sessionStorage tab close.
+  // during first-run setup. Back / last-step Continue clear inline in
+  // their respective handlers below; abandoned sessions clear on
+  // sessionStorage tab close.
   const onboardingSessionIdRef = useRef<string>('');
   if (!onboardingSessionIdRef.current) {
     onboardingSessionIdRef.current = getOrCreateOnboardingSessionId();
@@ -1233,9 +1240,8 @@ function OnboardingView({
   // result event can carry `duration_ms`; `runtime` state is the user's
   // current pick at click time so `runtime_type` rides along on every
   // click. The `_lifecycleReportedRef` guards against double-firing the
-  // completion event when the user fires both Skip and unmount in the
-  // same tick (the unmount path also clears the session id; see the
-  // PR #2453 follow-up).
+  // completion event if a submit path and unmount happen in the same tick
+  // (the unmount path also clears the session id; see the PR #2453 follow-up).
   const onboardingStartedAtRef = useRef<number>(Date.now());
   const lifecycleReportedRef = useRef(false);
   // Guards `about_you_submit` to exactly one emit per onboarding session,
@@ -2036,7 +2042,11 @@ function OnboardingView({
             <button
               type="button"
               onClick={() => setStep(index)}
-              disabled={onboardingNavigationLocked || index > maxStepReached}
+              disabled={
+                onboardingNavigationLocked ||
+                index > maxStepReached ||
+                (index > 0 && !connectStepRuntimeReady)
+              }
             >
               {label}
             </button>
