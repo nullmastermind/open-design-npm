@@ -24,7 +24,6 @@ beforeAll(() => {
     },
   });
 });
-
 afterEach(() => {
   cleanup();
   window.localStorage.clear();
@@ -602,4 +601,3 @@ describe('AssistantMessage recovered produced files', () => {
     expect(screen.getByText('agent-sketch.sketch.json')).toBeTruthy();
   });
 });
-

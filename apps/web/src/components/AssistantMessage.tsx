@@ -632,6 +632,8 @@ function AssistantMessageImpl({
                 suppressDirectionForms={suppressDirectionForms}
                 onOpenQuestions={onOpenQuestions}
                 projectId={projectId}
+                conversationId={conversationId}
+                runId={message.runId ?? null}
                 projectFileNames={projectFileNames}
                 onRequestOpenFile={onRequestOpenFile}
               />
@@ -1872,6 +1874,8 @@ function ProseBlock({
   suppressDirectionForms,
   onOpenQuestions,
   projectId,
+  conversationId,
+  runId,
   projectFileNames,
   onRequestOpenFile,
 }: {
@@ -1884,6 +1888,8 @@ function ProseBlock({
   nextUserContent?: string;
   suppressDirectionForms: boolean;
   projectId?: string | null;
+  conversationId?: string | null;
+  runId?: string | null;
   projectFileNames?: Set<string>;
   onOpenQuestions?: (request?: QuestionFormOpenRequest) => void;
   onRequestOpenFile?: (name: string) => void;
@@ -1974,7 +1980,19 @@ function ProseBlock({
           );
         }
         if (seg.kind === "od-card") {
-          return <OdCardView key={seg.key} card={seg.card} />;
+          return (
+            <OdCardView
+              key={seg.key}
+              card={seg.card}
+              instanceScope={[
+                projectId ?? "no-project",
+                conversationId ?? "no-conversation",
+                runId ?? "no-run",
+                assistantMessageId,
+                seg.key,
+              ].join(":")}
+            />
+          );
         }
         if (seg.kind === "suppressed-direction") {
           return (
