@@ -11,6 +11,7 @@
 import { useEffect, useRef, type ReactNode } from 'react';
 import { Icon } from './Icon';
 import { useT } from '../i18n';
+import { LIBRARY_UI_VISIBLE } from '../features/libraryUi';
 
 export type EntryView =
   | 'home'
@@ -19,6 +20,7 @@ export type EntryView =
   | 'tasks'
   | 'plugins'
   | 'design-systems'
+  | 'library'
   | 'brands'
   | 'integrations';
 
@@ -148,23 +150,25 @@ export function EntryNavRail({ view, onViewChange, onNewProject, open, onClose }
           <Icon name="folder" size={18} />
         </NavButton>
         <NavButton
-          active={view === 'brands'}
-          ariaLabel={t('entry.navBrands')}
-          tooltip={t('entry.navBrands')}
-          onClick={() => selectView('brands')}
-          testId="entry-nav-brands"
-        >
-          <Icon name="swatchbook" size={18} />
-        </NavButton>
-        <NavButton
           active={view === 'design-systems'}
           ariaLabel={t('entry.navDesignSystems')}
           tooltip={t('entry.navDesignSystems')}
           onClick={() => selectView('design-systems')}
           testId="entry-nav-design-systems"
         >
-          <Icon name="blocks" size={18} />
+          <Icon name="palette" size={18} />
         </NavButton>
+        {LIBRARY_UI_VISIBLE ? (
+          <NavButton
+            active={view === 'library'}
+            ariaLabel="Library"
+            tooltip="Library"
+            onClick={() => selectView('library')}
+            testId="entry-nav-library"
+          >
+            <Icon name="layers-filled" size={18} />
+          </NavButton>
+        ) : null}
         <NavButton
           active={view === 'tasks'}
           ariaLabel={t('entry.navTasks')}
