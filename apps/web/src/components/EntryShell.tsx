@@ -66,7 +66,7 @@ import type {
   TrackingCliProviderId,
 } from '@open-design/contracts/analytics';
 import { agentIdToTracking } from '@open-design/contracts/analytics';
-import { useT } from '../i18n';
+import { useT, useI18n } from '../i18n';
 import { navigate, useRoute } from '../router';
 import { setPendingDesignSystemCreateEntry } from '../analytics/ds-create-entry';
 import type {
@@ -107,6 +107,7 @@ import { AgentIcon } from './AgentIcon';
 import { LanguageMenu } from './LanguageMenu';
 import { IntegrationsView, type IntegrationTab } from './IntegrationsView';
 import { InlineModelSwitcher } from './InlineModelSwitcher';
+import { enterpriseUrl } from './enterpriseUrl';
 import {
   EntrySettingsMenu,
   type EntrySettingsSection,
@@ -351,7 +352,7 @@ interface Props {
   ) => Promise<ImportClaudeDesignOutcome | void> | ImportClaudeDesignOutcome | void;
   onImportFolder?: (baseDir: string) => Promise<void> | void;
   onImportFolderResponse?: (response: OpenDesignHostProjectImportSuccess) => Promise<void> | void;
-  onOpenProject: (id: string) => Promise<boolean> | boolean | void;
+  onOpenProject: (id: string, fileName?: string) => Promise<boolean> | boolean | void;
   onOpenLiveArtifact: (projectId: string, artifactId: string) => void;
   onDeleteProject: (id: string) => Promise<boolean | void> | boolean | void;
   onRenameProject: (id: string, name: string) => void;
