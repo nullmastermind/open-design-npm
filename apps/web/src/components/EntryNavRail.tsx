@@ -28,6 +28,7 @@ interface Props {
   view: EntryView;
   onViewChange: (view: EntryView) => void;
   onNewProject: () => void;
+  newProjectDisabled?: boolean;
   /** When false the rail is collapsed (hidden off-canvas) on the entry view. */
   open: boolean;
   /** Collapse the rail — called after a destination is chosen or the user dismisses it. */
@@ -39,16 +40,18 @@ interface NavButtonProps {
   ariaLabel: string;
   tooltip: string;
   onClick: () => void;
+  disabled?: boolean;
   testId?: string;
   children: ReactNode;
 }
 
-function NavButton({ active, ariaLabel, tooltip, onClick, testId, children }: NavButtonProps) {
+function NavButton({ active, ariaLabel, tooltip, onClick, disabled, testId, children }: NavButtonProps) {
   return (
     <button
       type="button"
       className={`entry-nav-rail__btn${active ? ' is-active' : ''}`}
       onClick={onClick}
+      disabled={disabled}
       aria-label={ariaLabel}
       aria-current={active ? 'page' : undefined}
       data-tooltip={tooltip}
@@ -59,7 +62,14 @@ function NavButton({ active, ariaLabel, tooltip, onClick, testId, children }: Na
   );
 }
 
-export function EntryNavRail({ view, onViewChange, onNewProject, open, onClose }: Props) {
+export function EntryNavRail({
+  view,
+  onViewChange,
+  onNewProject,
+  newProjectDisabled = false,
+  open,
+  onClose,
+}: Props) {
   const t = useT();
   const brandLabel = t('app.brand');
   const homeLabel = t('entry.navHome');
@@ -127,6 +137,7 @@ export function EntryNavRail({ view, onViewChange, onNewProject, open, onClose }
           ariaLabel={t('entry.navNewProject')}
           tooltip={t('entry.navNewProject')}
           onClick={onNewProject}
+          disabled={newProjectDisabled}
           testId="entry-nav-new-project"
         >
           <Icon name="plus" size={18} />

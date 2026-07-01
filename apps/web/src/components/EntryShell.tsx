@@ -117,6 +117,7 @@ import { PluginsView } from './PluginsView';
 import type { CreateInput, CreateTab, ImportClaudeDesignOutcome } from './NewProjectPanel';
 import type { PluginLoopSubmit } from './PluginLoopHome';
 import {
+  createProject,
   type PluginShareAction,
   type PluginShareProjectOutcome,
 } from '../state/projects';
@@ -326,6 +327,8 @@ interface Props {
   onApiProtocolChange: (protocol: ApiProtocol) => void;
   onApiModelChange: (model: string) => void;
   onConfigPersist: (cfg: AppConfig) => Promise<void> | void;
+  onSkillsRefresh?: () => Promise<void> | void;
+  onSkillsChanged?: (affectedSkillId?: string) => void;
   onRefreshAgents: () => Promise<AgentInfo[]> | AgentInfo[];
   // Quick theme switch from the avatar-popover dropdown. Lets the user
   // flip between system / light / dark without opening the full Settings
@@ -355,6 +358,7 @@ interface Props {
   onOpenProject: (id: string, fileName?: string) => Promise<boolean> | boolean | void;
   onOpenLiveArtifact: (projectId: string, artifactId: string) => void;
   onDeleteProject: (id: string) => Promise<boolean | void> | boolean | void;
+  onDuplicateProject?: (id: string) => Promise<void> | void;
   onRenameProject: (id: string, name: string) => void;
   onProjectsRefresh?: () => Promise<void> | void;
   onChangeDefaultDesignSystem: (id: string) => void;
@@ -448,6 +452,8 @@ export function EntryShell({
   onApiProtocolChange,
   onApiModelChange,
   onConfigPersist,
+  onSkillsRefresh,
+  onSkillsChanged,
   onRefreshAgents,
   onThemeChange,
   onCreateProject,
@@ -458,6 +464,7 @@ export function EntryShell({
   onOpenProject,
   onOpenLiveArtifact,
   onDeleteProject,
+  onDuplicateProject,
   onRenameProject,
   onProjectsRefresh,
   onChangeDefaultDesignSystem,
@@ -476,6 +483,11 @@ export function EntryShell({
   const route = useRoute();
   const view: EntryViewKind = route.kind === 'home' ? route.view : 'home';
   const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [blankProjectCreating, setBlankProjectCreating] = useState(false);
+  useEffect(() => {
+    if (view !== 'design-systems') return;
+    void onDesignSystemsRefresh?.();
+  }, [onDesignSystemsRefresh, view]);
   // The entry nav rail is collapsed by default (Manus-style) so the entry
   // view opens clean and full-width; the panel toggle in the topbar opens it
   // as an overlay that dismisses on selection / backdrop click / Escape.
@@ -555,6 +567,25 @@ export function EntryShell({
   function openNewProject(tab: CreateTab = 'prototype') {
     setNewProjectInitialTab(tab);
     setNewProjectOpen(true);
+  }
+
+  async function startBlankProject() {
+    if (blankProjectCreating) return;
+    setBlankProjectCreating(true);
+    setNewProjectOpen(false);
+    try {
+      const { project } = await createProject({
+        name: t('common.untitled'),
+        skillId: null,
+        designSystemId: null,
+      });
+      await onOpenProject(project.id);
+    } catch (err) {
+      console.warn('Could not create a blank project', err);
+      throw err;
+    } finally {
+      setBlankProjectCreating(false);
+    }
   }
 
   function handleCreate(input: CreateInput) {
@@ -738,7 +769,14 @@ export function EntryShell({
         <EntryNavRail
           view={view}
           onViewChange={changeView}
-          onNewProject={() => openNewProject()}
+          onNewProject={() => {
+            trackHomeNavClick(analytics.track, {
+              page_name: 'home',
+              area: 'nav',
+              element: 'new_project_plus',
+            });
+            openNewProject();
+          }}
           open={railOpen}
           onClose={() => setRailOpen(false)}
         />
@@ -799,6 +837,7 @@ export function EntryShell({
                 onOpenProject={onOpenProject}
                 onViewAllProjects={() => changeView('projects')}
                 onDeleteProject={onDeleteProject}
+                onDuplicateProject={onDuplicateProject}
                 onRenameProject={onRenameProject}
                 onBrowseRegistry={() => changeView('plugins')}
                 onOpenIntegrations={() => openIntegrationTab('connectors')}
@@ -806,6 +845,7 @@ export function EntryShell({
                 onOpenNewProject={(tab) => {
                   openNewProject(tab);
                 }}
+                onStartBlankProject={startBlankProject}
                 promptHandoff={homePromptHandoff}
                 skills={skills}
                 skillsLoading={skillsLoading}
@@ -829,10 +869,13 @@ export function EntryShell({
                     onOpen={onOpenProject}
                     onOpenLiveArtifact={onOpenLiveArtifact}
                     onDelete={onDeleteProject}
+                    onDuplicate={onDuplicateProject}
                     onRename={onRenameProject}
                     onRefresh={onProjectsRefresh}
                     isActive={view === 'projects'}
-                    onNewProject={() => openNewProject()}
+                    onNewProject={() => {
+                      openNewProject();
+                    }}
                   />
                 </div>
               )}
@@ -900,6 +943,7 @@ export function EntryShell({
               <BrandsTab
                 onApplyDesignSystem={onChangeDefaultDesignSystem}
                 onOpenProject={onOpenProject}
+                onDesignSystemsRefresh={onDesignSystemsRefresh}
               />
             </div>
             {view === 'integrations' ? (
@@ -907,7 +951,10 @@ export function EntryShell({
                 config={config}
                 initialTab={integrationTab}
                 composioConfigLoading={composioConfigLoading}
+                onConfigPersist={onConfigPersist}
                 onPersistComposioKey={onPersistComposioKey}
+                onSkillsRefresh={onSkillsRefresh}
+                onSkillsChanged={onSkillsChanged}
               />
             ) : null}
           </div>
@@ -2121,7 +2168,7 @@ function OnboardingView({
         aria-label={t('settings.welcomeTitle')}
       >
         <div className="onboarding-cloud__topbar">
-          <LanguageMenu compact />
+          <LanguageMenu compact placement="down" align="end" />
           <button
             type="button"
             className="onboarding-cloud__theme"
