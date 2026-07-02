@@ -110,6 +110,8 @@ describe('AssistantMessage next-step affordance', () => {
         {...h}
       />,
     );
+    expect(screen.getByTestId('file-ops-summary')).toBeTruthy();
+    expect(screen.getByTestId('file-ops-row-notes.md')).toBeTruthy();
     expect(screen.getByTestId('next-step-actions')).toBeTruthy();
     expect(screen.getByText(en['nextStep.projectGenerateArtifactTitle'])).toBeTruthy();
     fireEvent.click(screen.getByTestId('next-step-project-action-project-generate-artifact'));
@@ -215,5 +217,31 @@ describe('AssistantMessage next-step affordance', () => {
       />,
     );
     expect(screen.queryByTestId('next-step-actions')).toBeNull();
+  });
+
+  it('renders after a failed turn when a follow-up action is available', () => {
+    render(
+      <AssistantMessage
+        message={baseMessage({ producedFiles: [], runStatus: 'failed' })}
+        streaming={false}
+        projectId="proj-1"
+        isLast
+        {...handlers()}
+      />,
+    );
+    expect(screen.getByTestId('next-step-actions')).toBeTruthy();
+  });
+
+  it('renders after a canceled turn when a follow-up action is available', () => {
+    render(
+      <AssistantMessage
+        message={baseMessage({ producedFiles: [], runStatus: 'canceled' })}
+        streaming={false}
+        projectId="proj-1"
+        isLast
+        {...handlers()}
+      />,
+    );
+    expect(screen.getByTestId('next-step-actions')).toBeTruthy();
   });
 });

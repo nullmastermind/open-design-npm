@@ -4188,7 +4188,6 @@ export function SettingsDialog({
                           const modelSummary = agentModelSummary(a);
                           const amrBenefits = [
                             t('settings.amrBenefitOfficial'),
-                            t('settings.amrBenefitLowerPrice'),
                             t('settings.amrBenefitManyModels'),
                           ];
                           const versionLabel =
@@ -4334,6 +4333,11 @@ export function SettingsDialog({
                                             </span>
                                           </>
                                         ) : null}
+                                        {isAmrAgent && amrCardPlanLabel ? (
+                                          <VisuallyHidden>
+                                            {`, ${t('settings.amrPlan')} ${amrCardPlanLabel}`}
+                                          </VisuallyHidden>
+                                        ) : null}
                                       </div>
                                       {metaLabel ? (
                                         <div className="agent-card-meta">
@@ -4347,15 +4351,23 @@ export function SettingsDialog({
                                           <span className="agent-card-amr-email-text" title={amrCardEmail}>
                                             {amrCardEmail}
                                           </span>
-                                          <PlanBadge
-                                            plan={amrCardPlanLabel}
-                                            size="sm"
-                                            title={
-                                              amrCardPlanLabel
-                                                ? `${t('settings.amrPlan')} ${amrCardPlanLabel}`
-                                                : undefined
-                                            }
-                                          />
+                                          {amrCardPlanLabel ? (
+                                            <span
+                                              className="agent-card-plan-badge-slot"
+                                              aria-hidden="true"
+                                            >
+                                              <PlanBadge
+                                                plan={amrCardPlanLabel}
+                                                size="sm"
+                                                className="agent-card-plan-badge"
+                                                title={
+                                                  amrCardPlanLabel
+                                                    ? `${t('settings.amrPlan')} ${amrCardPlanLabel}`
+                                                    : undefined
+                                                }
+                                              />
+                                            </span>
+                                          ) : null}
                                           {amrCardProfileBadge ? (
                                             <span className="agent-card-amr-profile-badge">
                                               {amrCardProfileBadge}
@@ -4365,22 +4377,20 @@ export function SettingsDialog({
                                       ) : null}
                                       {amrWalletVisible ? (
                                         <div className="agent-card-amr-meta-row">
-                                          {amrWalletVisible ? (
-                                            <span className="agent-card-amr-balance">
-                                              <span className="agent-card-amr-balance-label">
-                                                {t('settings.amrBalance')}
-                                              </span>
-                                              <span className="agent-card-amr-balance-value">
-                                                {amrWalletValueLabel({
-                                                  balance: amrCardBalanceLabel,
-                                                  loadingLabel: t('common.loading'),
-                                                  ready: amrWalletReady || Boolean(amrCardBalanceLabel),
-                                                  snapshot: amrWalletSnapshot,
-                                                  unavailableLabel: t('settings.amrWalletUnavailable'),
-                                                })}
-                                              </span>
+                                          <span className="agent-card-amr-balance">
+                                            <span className="agent-card-amr-balance-label">
+                                              {t('settings.amrBalance')}
                                             </span>
-                                          ) : null}
+                                            <span className="agent-card-amr-balance-value">
+                                              {amrWalletValueLabel({
+                                                balance: amrCardBalanceLabel,
+                                                loadingLabel: t('common.loading'),
+                                                ready: amrWalletReady || Boolean(amrCardBalanceLabel),
+                                                snapshot: amrWalletSnapshot,
+                                                unavailableLabel: t('settings.amrWalletUnavailable'),
+                                              })}
+                                            </span>
+                                          </span>
                                         </div>
                                       ) : null}
                                       {!active && modelSummary ? (
