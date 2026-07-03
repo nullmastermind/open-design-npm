@@ -761,7 +761,6 @@ const AGENT_SHORT_DESCRIPTIONS: Record<string, string> = {
   claude: 'Anthropic official CLI',
   codex: 'OpenAI official CLI',
   'cursor-agent': 'Cursor command line',
-  gemini: 'Google official CLI',
   opencode: 'Open-source agent CLI',
   qwen: 'Qwen coding CLI',
   copilot: 'GitHub coding CLI',
@@ -2565,8 +2564,12 @@ export function SettingsDialog({
         return t('settings.testInvalidBaseUrl');
       case 'rate_limited':
         return t('settings.testRateLimited');
-      case 'upstream_unavailable':
-        return t('settings.testUpstream', { status: result.status ?? 0 });
+      case 'upstream_unavailable': {
+        const baseMessage = t('settings.testUpstream', {
+          status: result.status ?? 0,
+        });
+        return result.detail ? `${baseMessage} ${result.detail}` : baseMessage;
+      }
       case 'timeout':
         return t('settings.testTimeout', { ms });
       case 'agent_not_installed':
@@ -7842,7 +7845,22 @@ function IntegrationsSection() {
             }}
             data-lang={snippetLang}
           >
-            <code>
+            <code
+              style={{
+                // Neutralize the global inline-`code` chip style (background,
+                // padding, rounded corners, color, size) so it doesn't paint a
+                // light rounded rectangle behind every wrapped segment of the
+                // dark snippet block — which read as permanent selection
+                // highlights on the wrapped `claude mcp add-json` one-liner.
+                // Issue #4509.
+                background: 'transparent',
+                padding: 0,
+                borderRadius: 0,
+                color: 'inherit',
+                fontFamily: 'inherit',
+                fontSize: 'inherit',
+              }}
+            >
               {snippet ||
                 (infoError
                   ? t('settings.mcpResolvingFailed')

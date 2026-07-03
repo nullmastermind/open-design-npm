@@ -160,7 +160,7 @@ import {
 } from './integrations/vela.js';
 import {
   amrAccountFailureDetails,
-  classifyAmrAccountFailure,
+  classifyAmrAccountFailureSignal,
 } from './integrations/vela-errors.js';
 import { amrModelLoadingCache } from './runtimes/amr-model-cache.js';
 import {
@@ -197,7 +197,11 @@ import {
 } from './skills.js';
 import { validateLinkedDirs } from './linked-dirs.js';
 import { installFromTarget, uninstallById, sanitizeRepoName } from './library-install.js';
-import { buildWindowsFolderDialogCommand, parseFolderDialogStdout } from './native-folder-dialog.js';
+import {
+  buildWindowsFolderDialogCommand,
+  parseFolderDialogStdout,
+  parseLinuxFolderDialogResult,
+} from './native-folder-dialog.js';
 import {
   AssetCacheError,
   assetCacheRewriteUrl,
@@ -2906,7 +2910,7 @@ function requestRunOverride(runId, tokenRunId) {
 }
 
 function openNativeFolderDialog() {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const platform = process.platform;
     if (platform === 'darwin') {
       // `choose folder` is handled specially by the system: it presents a fully
@@ -2930,10 +2934,12 @@ function openNativeFolderDialog() {
         'zenity',
         ['--file-selection', '--directory', '--title=Select a code folder to link'],
         { timeout: 120_000 },
-        (err, stdout) => {
-          if (err) return resolve(null);
-          const p = stdout.trim();
-          resolve(p || null);
+        (err, stdout, stderr) => {
+          try {
+            resolve(parseLinuxFolderDialogResult(err, stdout, stderr));
+          } catch (folderDialogError) {
+            reject(folderDialogError);
+          }
         },
       );
     } else if (platform === 'win32') {
@@ -7099,7 +7105,7 @@ export async function startServer({
           stallPayload = createSseErrorPayload(
             logFailure.code,
             logFailure.message,
-            { retryable: true },
+            { retryable: logFailure.retryable },
           );
         }
       }
@@ -8171,15 +8177,14 @@ export async function startServer({
           noteAgentActivity();
           if (event === 'error') flushVisibleAgentStderr();
           if (def.id === 'amr' && event === 'error') {
-            const failure = classifyAmrAccountFailure(
-              [
-                typeof data?.message === 'string' ? data.message : '',
-                typeof data?.error?.message === 'string' ? data.error.message : '',
-                typeof data?.error?.code === 'string' ? data.error.code : '',
-                agentStdoutTail,
-                agentStderrTail,
-              ].join('\n'),
-            );
+            const failure = classifyAmrAccountFailureSignal({
+              details: data?.error?.details,
+              message: data?.message,
+              errorMessage: data?.error?.message,
+              errorCode: data?.error?.code,
+              stdoutTail: agentStdoutTail,
+              stderrTail: agentStderrTail,
+            });
             if (failure) {
               sendAmrAccountFailure(failure);
               return;
@@ -8382,9 +8387,10 @@ export async function startServer({
         !run.cancelRequested
       ) {
         if (def.id === 'amr') {
-          const amrFailure = classifyAmrAccountFailure(
-            `${agentStderrTail}\n${agentStdoutTail}`,
-          );
+          const amrFailure = classifyAmrAccountFailureSignal({
+            stdoutTail: agentStdoutTail,
+            stderrTail: agentStderrTail,
+          });
           if (amrFailure) {
             sendAmrAccountFailure(amrFailure);
             return finishWithRetryDecision('failed', code ?? 1, signal ?? null);
@@ -8608,7 +8614,7 @@ export async function startServer({
             send('error', createSseErrorPayload(
               openCodeFailure.code,
               openCodeFailure.message,
-              { retryable: true },
+              { retryable: openCodeFailure.retryable },
             ));
           } else {
             const rewritten = rewriteKnownAgentStreamError(

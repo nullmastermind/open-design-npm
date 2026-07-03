@@ -1623,6 +1623,41 @@ describe('SettingsDialog execution settings BYOK interactions', () => {
     expect(testConnectionCalls).toHaveLength(1);
   });
 
+  it('shows provider upstream detail for failed BYOK connection tests', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString();
+      if (url === '/api/memory') {
+        return new Response(
+          JSON.stringify({ enabled: true, memories: [], extraction: null }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      expect(url).toBe('/api/test/connection');
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          kind: 'upstream_unavailable',
+          latencyMs: 42,
+          status: 400,
+          detail:
+            'The selected NVIDIA model instance is currently unavailable at the provider. Try a different model or retry later.',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderSettingsDialog({ apiKey: 'sk-ant-test-provider' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Test' }));
+
+    expect(
+      await screen.findByText(
+        /Provider returned 400\. Try again in a moment\. The selected NVIDIA model instance is currently unavailable/,
+      ),
+    ).toBeTruthy();
+  });
+
   it('blocks an obvious OpenAI key in the Anthropic tab before testing', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       if (input.toString() === '/api/memory') {
@@ -2105,14 +2140,14 @@ describe('SettingsDialog execution settings Local CLI interactions', () => {
   it('lets users switch to Local CLI, select an installed agent, and autosave', async () => {
     const installed = availableAgents[0]!;
     const unavailable: AgentInfo = {
-      id: 'gemini',
-      name: 'Gemini CLI',
-      bin: 'gemini',
+      id: 'kimi',
+      name: 'Kimi CLI',
+      bin: 'kimi',
       available: false,
       version: null,
       models: [],
-      installUrl: 'https://github.com/google-gemini/gemini-cli',
-      docsUrl: 'https://github.com/google-gemini/gemini-cli/blob/main/README.md',
+      installUrl: 'https://github.com/MoonshotAI/kimi-cli',
+      docsUrl: 'https://www.kimi.com/code/docs/en/kimi-cli/guides/getting-started.html?aff=open-design',
     };
     const { onPersist } = renderSettingsDialog(
       { mode: 'daemon', agentId: null },
@@ -2127,12 +2162,12 @@ describe('SettingsDialog execution settings Local CLI interactions', () => {
     expect(installGroupSummary.closest('details')?.hasAttribute('open')).toBe(false);
     const codexCard = screen.getByRole('button', { name: /Codex CLI/i }) as HTMLButtonElement;
     fireEvent.click(installGroupSummary);
-    const geminiGroup = screen.getByRole('group', { name: /Gemini CLI/i });
-    expect(within(geminiGroup).getByText('Google official CLI')).toBeTruthy();
+    const kimiGroup = screen.getByRole('group', { name: /Kimi CLI/i });
+    expect(within(kimiGroup).getByText('Moonshot Kimi CLI')).toBeTruthy();
     expect(
-      (within(geminiGroup).getByRole('link', { name: en['settings.agentInstall.install'] }) as HTMLAnchorElement).getAttribute('href'),
+      (within(kimiGroup).getByRole('link', { name: en['settings.agentInstall.install'] }) as HTMLAnchorElement).getAttribute('href'),
     ).toBe(
-      'https://github.com/google-gemini/gemini-cli',
+      'https://github.com/MoonshotAI/kimi-cli',
     );
     expect(
       screen.getByText(en['settings.agentInstall.stepAuth']),
@@ -2441,13 +2476,13 @@ describe('SettingsDialog execution settings Local CLI interactions', () => {
 
   it('rescans automatically when returning after opening an install link', async () => {
     const unavailable: AgentInfo = {
-      id: 'gemini',
-      name: 'Gemini CLI',
-      bin: 'gemini',
+      id: 'kimi',
+      name: 'Kimi CLI',
+      bin: 'kimi',
       available: false,
       version: null,
       models: [],
-      installUrl: 'https://github.com/google-gemini/gemini-cli',
+      installUrl: 'https://github.com/MoonshotAI/kimi-cli',
     };
     const onRefreshAgents = vi.fn(async () => availableAgents);
 
