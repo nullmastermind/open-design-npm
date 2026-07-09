@@ -1679,6 +1679,47 @@ export async function fetchProjectFileText(
   }
 }
 
+export async function fetchProjectFileTextPreview(
+  projectId: string,
+  name: string,
+  options?: { limit?: number; cacheBustKey?: string | number },
+): Promise<ProjectFileTextPreviewResponse | null> {
+  const segments = name
+    .split('/')
+    .filter((segment) => segment.length > 0)
+    .map(encodeURIComponent)
+    .join('/');
+  if (!segments) return null;
+  const params = new URLSearchParams();
+  if (options?.limit != null) params.set('limit', String(options.limit));
+  if (options?.cacheBustKey != null) params.set('cacheBust', String(options.cacheBustKey));
+  const query = params.toString();
+  const url = `/api/projects/${encodeURIComponent(projectId)}/text-preview/${segments}${query ? `?${query}` : ''}`;
+
+  try {
+    const resp = await fetch(url, { cache: 'no-store' });
+    if (!resp.ok) {
+      console.warn('[fetchProjectFileTextPreview] failed:', {
+        name,
+        projectId,
+        status: resp.status,
+        statusText: resp.statusText,
+        url,
+      });
+      return null;
+    }
+    return (await resp.json()) as ProjectFileTextPreviewResponse;
+  } catch (err) {
+    console.warn('[fetchProjectFileTextPreview] failed:', {
+      error: err,
+      name,
+      projectId,
+      url,
+    });
+    return null;
+  }
+}
+
 function projectFileVersionsUrl(projectId: string, name: string): string {
   const safePath = name
     .split('/')

@@ -10,6 +10,10 @@ import { deriveUploadCohort } from './analytics/upload-tracking';
 import { setPendingDesignSystemCreateEntry } from './analytics/ds-create-entry';
 import { detectClientType } from './analytics/identity';
 import {
+  stashOnboardingEntryForProject,
+  type OnboardingEntry,
+} from './onboarding/onboarding-entry';
+import {
   deriveConfigureGlobals,
   projectKindFromMetadataToTracking,
   fidelityToTracking,
@@ -140,6 +144,7 @@ type AppCreateProjectInput = Omit<CreateInput, 'metadata'> & {
   pendingFiles?: File[];
   userWorkingDirToken?: string;
   linkedDirs?: string[] | null;
+  onboardingEntry?: OnboardingEntry;
 };
 
 const APP_CONFIG_CHANGED_EVENT = 'open-design:app-config-changed';
@@ -1576,6 +1581,23 @@ function AppInner() {
              back to manual send. */
         }
       }
+      // Home recommendation handoff: now that the project exists and its id is
+      // known, stash the onboarding entry keyed by that id. Studio consumes it
+      // by the same id on mount. Keying by id (instead of a single global slot
+      // written before create) removes the race where opening an unrelated
+      // project mid-create could steal the personalized funnel context, and
+      // means a failed/aborted create leaves nothing behind.
+      if (input.onboardingEntry) {
+        // Cache the prefilled seed prompt WITH the entry so the first-prompt
+        // funnel's `has_prefilled_prompt` comparison base survives a
+        // reopen-before-send (project.pendingPrompt is wiped on first mount).
+        stashOnboardingEntryForProject(result.project.id, {
+          ...input.onboardingEntry,
+          ...(derivedPendingPrompt
+            ? { seedPrompt: derivedPendingPrompt.trim() }
+            : {}),
+        });
+      }
       const project = result.appliedPluginSnapshotId
         ? {
             ...result.project,
@@ -1873,13 +1895,15 @@ function AppInner() {
     void patchProject(id, { name: trimmed });
   }, []);
 
-  // Return to wherever the user opened this project from (Projects, Tasks, a
-  // design system, …) by popping the history stack. Falls back to the Projects
-  // list only when there is no in-app history behind us (a deep link / fresh
-  // load straight onto the project URL) — see `goBack`.
   const handleBack = useCallback(() => {
+    const currentProjectId = route.kind === 'project' ? route.projectId : null;
     goBack({ kind: 'home', view: 'projects' });
-  }, []);
+    if (currentProjectId && typeof window !== 'undefined') {
+      window.setTimeout(() => {
+        iframeKeepAlivePool.evictProject(currentProjectId, { includeActive: true });
+      }, 0);
+    }
+  }, [iframeKeepAlivePool, route]);
 
   const handleClearPendingPrompt = useCallback(() => {
     const projectId = route.kind === 'project' ? route.projectId : null;
