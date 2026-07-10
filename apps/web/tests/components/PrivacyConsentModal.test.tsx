@@ -10,35 +10,35 @@ function renderModal(overrides?: { onAccept?: () => void }) {
   const onAccept = overrides?.onAccept ?? vi.fn();
   render(
     <I18nProvider initial="en">
-      <PrivacyConsentModal onAccept={onAccept} />
+      <PrivacyConsentModal onShare={onShare} onDecline={onDecline} />
     </I18nProvider>,
   );
-  return { onAccept };
+  return { ...result, onShare, onDecline };
 }
 
 describe('PrivacyConsentModal', () => {
-  afterEach(cleanup);
-
-  it('renders a single "I get it" acknowledgement button (no decline)', () => {
-    renderModal();
-    expect(screen.getByRole('button', { name: 'I get it' })).toBeTruthy();
-    // Single-button banner: previous double-button labels must be gone so
-    // the surface reads as informed-disclosure-plus-acknowledgement, not a
-    // forced binary choice.
-    expect(screen.queryByRole('button', { name: 'Share usage data' })).toBeNull();
-    expect(screen.queryByRole('button', { name: "Don't share" })).toBeNull();
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
   });
 
-  it('tells the user data sharing is on by default and toggleable in Settings', () => {
+  it('renders explicit share and decline choices', () => {
+    const { container } = renderModal();
+    const share = screen.getByRole('button', { name: 'Share' });
+    expect(share.className).toContain('privacy-consent-action--primary');
+    expect(screen.getByRole('button', { name: "Don't share" }).className)
+      .not.toContain('privacy-consent-action--primary');
+    expect(screen.queryByRole('button', { name: 'I get it' })).toBeNull();
+    expect(container.querySelector('.privacy-consent-banner-head .kicker')).toBeNull();
+  });
+
+  it('tells the user choices are changeable in Settings', () => {
     renderModal();
-    // The single-button banner replaces the binary consent picker, so the
-    // disclosure must say plainly that telemetry defaults on and point the
-    // user at the off switch in Settings. Without this hint the surface
-    // would feel like a dark pattern.
-    const footer = screen.getByText(/Data sharing is on by default/i);
+    expect(screen.getByText(/Sharing usage data helps us understand/i)).toBeTruthy();
+    const footer = screen.getByText(/You can change these any time/i);
+    expect(footer.textContent ?? '').toMatch(/You can change these any time/i);
     expect(footer.textContent ?? '').toMatch(/Settings/);
     expect(footer.textContent ?? '').toMatch(/Privacy/);
-    expect(footer.textContent ?? '').toMatch(/turn it off any time/i);
   });
 
   it('invokes onAccept when the acknowledgement button is clicked', () => {

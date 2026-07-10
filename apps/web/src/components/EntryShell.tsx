@@ -111,6 +111,7 @@ import { ONBOARDING_ARTIFACT_CHIP_IDS } from './home-hero/chips';
 import { homeHeroChipLabel } from './home-hero/chip-labels';
 import type { PluginUseAction } from './plugins-home/useActions';
 import { Icon } from './Icon';
+import { defaultAgentModelId, effectiveAgentModelChoice } from './agentModelSelection';
 import { AgentIcon } from './AgentIcon';
 import {
   getModelCapabilityTag,
@@ -228,6 +229,10 @@ type OnboardingProfileState = {
   orgSize: string;
   useCase: string[];
   source: string;
+  // Free-text detail when `source === 'other'`. Kept separate from `source`
+  // so attribution can still aggregate on the 'other' bucket while capturing
+  // the raw self-reported channel.
+  sourceOther: string;
   email: string;
 };
 
@@ -530,7 +535,11 @@ export function EntryShell({
   // resolves the promise the submit handler is awaiting ('proceed' continues
   // the very same create-and-run).
   const [amrLowBalanceWarn, setAmrLowBalanceWarn] = useState<
-    { snapshot: AmrWalletSnapshot; resolve: (decision: AmrLowBalanceDecision) => void } | null
+    {
+      snapshot: AmrWalletSnapshot;
+      plan: string | null;
+      resolve: (decision: AmrLowBalanceDecision) => void;
+    } | null
   >(null);
   useEffect(() => {
     if (view !== 'design-systems') return;
@@ -700,8 +709,9 @@ export function EntryShell({
         // Hold THIS submit while the reminder waits for a decision; 'proceed'
         // resumes the same create-and-run below, so HomeView's normal accept
         // path (draft clearing, context consumption) still applies.
+        const plan = await resolveAmrLowBalancePlan(gate.snapshot);
         const decision = await new Promise<AmrLowBalanceDecision>((resolve) => {
-          setAmrLowBalanceWarn({ snapshot: gate.snapshot, resolve });
+          setAmrLowBalanceWarn({ snapshot: gate.snapshot, plan, resolve });
         });
         setAmrLowBalanceWarn(null);
         if (decision !== 'proceed') return 'blocked' as const;
@@ -992,6 +1002,7 @@ export function EntryShell({
             {amrLowBalanceWarn ? (
               <AmrLowBalanceDialog
                 balanceUsd={amrLowBalanceWarn.snapshot.balanceUsd}
+                plan={amrLowBalanceWarn.plan}
                 profile={amrLowBalanceWarn.snapshot.profile}
                 entrySource="home_low_balance_warn_recharge"
                 metricsConsent={config.telemetry?.metrics === true}
@@ -1260,6 +1271,7 @@ function OnboardingView({
     orgSize: '',
     useCase: [] as string[],
     source: '',
+    sourceOther: '',
     email: '',
   });
   // Live mirror of `profile` so closures that fire faster than React
@@ -1275,6 +1287,20 @@ function OnboardingView({
   useEffect(() => {
     profileRef.current = profile;
   }, [profile]);
+  // Update the About-you profile through this helper (not `setProfile`
+  // directly) whenever the value feeds an imperative read. It mirrors the new
+  // value into `profileRef.current` synchronously, so paths that read the live
+  // ref before React's state→ref sync effect runs — `emitAboutYouSubmit`, the
+  // Memory note, the newsletter submit — never see a stale field even when the
+  // user changes an answer and immediately continues.
+  const updateProfile = useCallback(
+    (producer: (current: OnboardingProfileState) => OnboardingProfileState) => {
+      const next = producer(profileRef.current);
+      profileRef.current = next;
+      setProfile(next);
+    },
+    [],
+  );
   const agentRevealTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
   const cliScanTokenRef = useRef(0);
   const cliScanTelemetryRef = useRef<{
@@ -1345,7 +1371,8 @@ function OnboardingView({
   const amrSelectedAndSignedOut = runtime === 'amr' && !amrSignedIn;
   const selectedAgent = visibleAgents.find((agent) => agent.id === config.agentId) ?? null;
   const selectedAgentChoice = selectedAgent ? (config.agentModels?.[selectedAgent.id] ?? {}) : {};
-  const selectedAgentTestModel = selectedAgentChoice.model ?? selectedAgent?.models?.[0]?.id ?? '';
+  const normalizedSelectedAgentChoice = effectiveAgentModelChoice(selectedAgent, selectedAgentChoice) ?? selectedAgentChoice;
+  const selectedAgentTestModel = normalizedSelectedAgentChoice.model ?? defaultAgentModelId(selectedAgent) ?? '';
   const selectedAgentTestReasoning = selectedAgentChoice.reasoning ?? '';
   const agentTestInputKey = [
     selectedAgent?.id ?? '',
@@ -1615,6 +1642,11 @@ function OnboardingView({
         use_cases: liveProfile.useCase.length > 0
           ? liveProfile.useCase
           : ['unknown'],
+        // Only the enumerated bucket ships to analytics. The raw "Other"
+        // free-text is deliberately NOT forwarded here: analytics events must
+        // stay free-text/PII-free (see the contract note on OnboardingClickProps),
+        // and the scrubber does not sanitize arbitrary event properties. The
+        // typed detail lives only in app-owned local storage (Memory note).
         discovery_source: liveProfile.source || 'unknown',
       } : {}),
     });
@@ -1654,16 +1686,20 @@ function OnboardingView({
     { value: 'agency', label: t('settings.onboardingUseAgency') },
   ];
   const sourceOptions = [
+    { value: 'x', label: t('settings.onboardingSourceX') },
     { value: 'github', label: t('settings.onboardingSourceGithub') },
-    { value: 'friend', label: t('settings.onboardingSourceFriend') },
-    { value: 'social', label: t('settings.onboardingSourceSocial') },
-    { value: 'product-hunt', label: t('settings.onboardingSourceProductHunt') },
-    { value: 'community', label: t('settings.onboardingSourceCommunity') },
     { value: 'youtube', label: t('settings.onboardingSourceYoutube') },
-    { value: 'blog', label: t('settings.onboardingSourceBlog') },
-    { value: 'ai-tool', label: t('settings.onboardingSourceAiTool') },
+    { value: 'tiktok', label: t('settings.onboardingSourceTiktok') },
+    { value: 'reddit', label: t('settings.onboardingSourceReddit') },
+    { value: 'linkedin', label: t('settings.onboardingSourceLinkedin') },
+    { value: 'meta_social', label: t('settings.onboardingSourceMetaSocial') },
     { value: 'search', label: t('settings.onboardingSourceSearch') },
-    { value: 'event', label: t('settings.onboardingSourceEvent') },
+    { value: 'ai_tool', label: t('settings.onboardingSourceAiTool') },
+    { value: 'friend', label: t('settings.onboardingSourceFriend') },
+    { value: 'community', label: t('settings.onboardingSourceCommunity') },
+    { value: 'email', label: t('settings.onboardingSourceEmail') },
+    { value: 'blog', label: t('settings.onboardingSourceBlog') },
+    { value: 'other', label: t('settings.onboardingSourceOther') },
   ];
 
   function cleanOnboardingOptionLabel(label: string): string {
@@ -1694,7 +1730,12 @@ function OnboardingView({
       ]);
     }
     if (snapshot.source) {
-      fields.push(['Discovery source', optionLabel(sourceOptions, snapshot.source)]);
+      const sourceLabel = optionLabel(sourceOptions, snapshot.source);
+      const custom = snapshot.source === 'other' ? snapshot.sourceOther.trim() : '';
+      fields.push([
+        'Discovery source',
+        custom ? `${sourceLabel} (${custom})` : sourceLabel,
+      ]);
     }
     return fields.map(([label, value]) => `- ${label}: ${value}`).join('\n');
   }
@@ -2118,6 +2159,10 @@ function OnboardingView({
     aboutYouReportedRef.current = true;
     const snapshot = profileRef.current;
     const submittedAt = new Date();
+    // The raw "Other" free-text is intentionally excluded from the attribution
+    // profile: it flows into analytics (person properties) and AMR, which must
+    // stay free-text/PII-free. Only the enumerated `source` bucket is carried.
+    // The typed detail is preserved solely in the app-owned Memory note below.
     const attributionProfile = {
       role: snapshot.role,
       orgSize: snapshot.orgSize,
@@ -2561,7 +2606,7 @@ function OnboardingView({
                     daemonLive={daemonLive}
                     selectedAgentId={config.agentId}
                     selectedAgent={selectedAgent}
-                    selectedModel={selectedAgentChoice.model ?? selectedAgent?.models?.[0]?.id ?? ''}
+                    selectedModel={normalizedSelectedAgentChoice.model ?? defaultAgentModelId(selectedAgent) ?? ''}
                     modelOptions={agentModelOptions}
                     scanStatus={cliScanStatus}
                     onRefresh={() => void scanCliAgents()}
@@ -2648,7 +2693,7 @@ function OnboardingView({
                         role: value,
                       });
                     }
-                    setProfile((current) => ({ ...current, role: value }));
+                    updateProfile((current) => ({ ...current, role: value }));
                   }}
                 />
                 <OnboardingChipField
@@ -2661,7 +2706,7 @@ function OnboardingView({
                         organization_size: value,
                       });
                     }
-                    setProfile((current) => ({ ...current, orgSize: value }));
+                    updateProfile((current) => ({ ...current, orgSize: value }));
                   }}
                 />
                 <OnboardingChipField
@@ -2686,7 +2731,7 @@ function OnboardingView({
                         emitOnboardingClick('use_case', 'select_option', { use_case: v });
                       }
                     }
-                    setProfile((current) => ({ ...current, useCase: value }));
+                    updateProfile((current) => ({ ...current, useCase: value }));
                   }}
                 />
                 <OnboardingChipField
@@ -2699,8 +2744,39 @@ function OnboardingView({
                         discovery_source: value,
                       });
                     }
-                    setProfile((current) => ({ ...current, source: value }));
+                    // Clear the free-text detail whenever the chip changes away
+                    // from 'Other' so a stale custom value never leaks into
+                    // attribution for a different bucket. Routed through
+                    // updateProfile so the live ref reflects the cleared value
+                    // immediately, even if the user changes chip then continues.
+                    updateProfile((current) => ({
+                      ...current,
+                      source: typeof value === 'string' ? value : current.source,
+                      sourceOther: value === 'other' ? current.sourceOther : '',
+                    }));
                   }}
+                  trailing={
+                    profile.source === 'other' ? (
+                      <input
+                        type="text"
+                        className="onboarding-chip-field__other-input"
+                        maxLength={64}
+                        autoComplete="off"
+                        autoFocus
+                        placeholder={t('settings.onboardingSourceOtherPlaceholder')}
+                        aria-label={t('settings.onboardingSourceOtherPlaceholder')}
+                        value={profile.sourceOther}
+                        onChange={(event) => {
+                          const next = event.target.value;
+                          // updateProfile keeps profileRef in sync synchronously
+                          // so the Memory note (written from the live ref) never
+                          // drops the latest keystrokes on a fast type-then-
+                          // Continue.
+                          updateProfile((current) => ({ ...current, sourceOther: next }));
+                        }}
+                      />
+                    ) : null
+                  }
                 />
               </div>
             </div>
@@ -2733,7 +2809,7 @@ function OnboardingView({
                   placeholder={t('newsletter.placeholder')}
                   value={profile.email}
                   onChange={(event) =>
-                    setProfile((current) => ({ ...current, email: event.target.value }))
+                    updateProfile((current) => ({ ...current, email: event.target.value }))
                   }
                 />
               </label>
@@ -3458,7 +3534,7 @@ function OnboardingPanelHeader({ title, body }: { title: string; body: string })
   );
 }
 
-type OnboardingChipFieldProps =
+type OnboardingChipFieldProps = (
   | {
       label: string;
       options: Array<{ value: string; label: string }>;
@@ -3472,12 +3548,18 @@ type OnboardingChipFieldProps =
       value: string[];
       onChange: (value: string[]) => void;
       multiple: true;
-    };
+    }
+) & {
+  // Optional element rendered inline at the end of the chip row (e.g. a
+  // free-text input revealed by an "Other" pick), so it reads as attached
+  // to the last chip rather than floating below the group.
+  trailing?: ReactNode;
+};
 
 // Profile fields render their options as flat toggleable chips so every choice
 // is visible and a selection takes one tap instead of opening a dropdown first.
 function OnboardingChipField(props: OnboardingChipFieldProps) {
-  const { label, options } = props;
+  const { label, options, trailing } = props;
   const selected = props.multiple
     ? props.value
     : props.value
@@ -3512,6 +3594,7 @@ function OnboardingChipField(props: OnboardingChipFieldProps) {
             </button>
           );
         })}
+        {trailing}
       </div>
     </div>
   );

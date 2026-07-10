@@ -58,7 +58,11 @@ import {
   AMR_LOGIN_STATUS_EVENT,
   amrLoginStatusEventReason,
 } from './amrLoginPolling';
-import { amrRechargeUrlForProfile, resolveRunFailureUi } from '../runtime/amr-guidance';
+import {
+  amrPlansUrlForProfile,
+  amrRechargeUrlForProfile,
+  resolveRunFailureUi,
+} from '../runtime/amr-guidance';
 import {
   fetchVelaLoginStatus,
   type VelaLoginStatus,
@@ -908,8 +912,8 @@ export function ChatPane({
   // shouldn't be yanked back the moment the next chunk streams in.
   const pinnedToBottomRef = useRef(true);
   const scrolledToFormRef = useRef<Set<string>>(new Set());
-  const refreshInlineAmrLoginStatus = useCallback(async () => {
-    const next = await fetchVelaLoginStatus().catch(() => null);
+  const refreshInlineAmrLoginStatus = useCallback(async (options: { refresh?: boolean } = {}) => {
+    const next = await fetchVelaLoginStatus(options).catch(() => null);
     if (next) setInlineAmrLoginStatus(next);
     return next;
   }, []);
@@ -924,6 +928,19 @@ export function ChatPane({
     window.addEventListener(AMR_LOGIN_STATUS_EVENT, onAmrLoginStatusChange);
     return () => {
       window.removeEventListener(AMR_LOGIN_STATUS_EVENT, onAmrLoginStatusChange);
+    };
+  }, [refreshInlineAmrLoginStatus]);
+
+  useEffect(() => {
+    const refreshAfterExternalAmrReturn = () => {
+      if (document.visibilityState === 'hidden') return;
+      void refreshInlineAmrLoginStatus({ refresh: true });
+    };
+    window.addEventListener('focus', refreshAfterExternalAmrReturn);
+    document.addEventListener('visibilitychange', refreshAfterExternalAmrReturn);
+    return () => {
+      window.removeEventListener('focus', refreshAfterExternalAmrReturn);
+      document.removeEventListener('visibilitychange', refreshAfterExternalAmrReturn);
     };
   }, [refreshInlineAmrLoginStatus]);
 
@@ -1124,7 +1141,11 @@ export function ChatPane({
   // Per-case failure UI (button + copy + whether to promote AMR). Only
   // meaningful for a failed run (retryAssistant present).
   const runFailureUi = retryAssistant
-    ? resolveRunFailureUi(failedRunErrorEvent?.code, retryAssistant.agentId)
+    ? resolveRunFailureUi(
+        failedRunErrorEvent?.code,
+        failedRunErrorEvent?.failureDetail,
+        retryAssistant.agentId,
+      )
     : null;
   const hasInlineAmrAuthorizeFailure = Boolean(
     retryAssistant && onRetry && runFailureUi?.primaryAction === 'authorize',
@@ -1212,7 +1233,9 @@ export function ChatPane({
   // — the commercial recovery path; warn (amber) for the self-healing
   // connection drop; error (red) for everything else. Purely visual.
   const runErrorTone: 'error' | 'warn' | 'brand' =
-    runFailureUi?.primaryAction === 'authorize' || runFailureUi?.primaryAction === 'recharge'
+    runFailureUi?.primaryAction === 'authorize' ||
+    runFailureUi?.primaryAction === 'recharge' ||
+    runFailureUi?.primaryAction === 'upgrade'
       ? 'brand'
       : failedRunErrorEvent?.code === 'AGENT_CONNECTION_DROPPED'
         ? 'warn'
@@ -1262,8 +1285,19 @@ export function ChatPane({
         }
       : null;
   const showByokRecoveryCta = showByokRecoveryAction && Boolean(onSwitchToLocalCli);
-  const showErrorActions =
-    showByokRecoveryCta || Boolean(retryAssistant && onRetry && runFailureUi);
+  // A `primaryAction: 'none'` failure (e.g. a hard quota where retrying is
+  // futile) contributes no button of its own — it relies on the AMR switch card
+  // below. Only claim the actions row when a real control will render, so a
+  // no-action card doesn't leave an empty flex row (and a dangling column gap).
+  const runFailureHasAction = Boolean(
+    retryAssistant &&
+      onRetry &&
+      runFailureUi &&
+      (runFailureUi.primaryAction !== 'none' ||
+        runFailureUi.secondaryRetry ||
+        canResumeFailedRun),
+  );
+  const showErrorActions = showByokRecoveryCta || runFailureHasAction;
   useEffect(() => {
     if (!displayError || !failedRunErrorEvent?.code || !retryAssistant) return;
     // The hosted-AMR nudge owns this same surface_view when it renders below
@@ -2383,7 +2417,7 @@ export function ChatPane({
                     </div>
                   ) : null}
                   {/* ③ fix actions */}
-                  {showErrorActions || (retryAssistant && onRetry && runFailureUi) ? (
+                  {showErrorActions ? (
                     <div className="run-error__actions">
                       {showByokRecoveryCta ? (
                         <button
@@ -2496,6 +2530,39 @@ export function ChatPane({
                               }}
                             >
                               {t('chat.amrError.rechargeCta')}
+                            </button>
+                          ) : runFailureUi.primaryAction === 'upgrade' ? (
+                            <button
+                              type="button"
+                              className="chat-error-action"
+                              onClick={() => {
+                                const attribution = recordAmrEntry(
+                                  analytics.track,
+                                  'chat_error_upgrade',
+                                  new Date(),
+                                  {
+                                    metricsConsent:
+                                      config?.telemetry?.metrics === true,
+                                  },
+                                );
+                                const deviceId = amrHandoffDeviceId({
+                                  metricsConsent:
+                                    config?.telemetry?.metrics === true,
+                                  resolvedDeviceId: getResolvedDeviceId(),
+                                  installationId: config?.installationId,
+                                });
+                                window.open(
+                                  attributedAmrUrl(
+                                    amrPlansUrlForProfile(amrProfile),
+                                    attribution,
+                                    deviceId,
+                                  ),
+                                  '_blank',
+                                  'noopener,noreferrer',
+                                );
+                              }}
+                            >
+                              {t('chat.amrBalanceGate.plansCta')}
                             </button>
                           ) : null}
                           {canResumeFailedRun ? (

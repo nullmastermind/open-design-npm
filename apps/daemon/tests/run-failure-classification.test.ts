@@ -16,6 +16,9 @@ vi.mock('../src/integrations/vela-errors.js', () => ({
     if (value.includes('authentication required') || value.includes('not authenticated') || value.includes('unauthorized')) {
       return { code: 'AMR_AUTH_REQUIRED' as const };
     }
+    if (value.includes('tier_model_not_entitled') || value.includes('tier_request_kind_not_entitled')) {
+      return { code: 'AMR_TIER_UPGRADE_REQUIRED' as const };
+    }
     return null;
   },
 }));
@@ -1204,6 +1207,36 @@ describe('classifyRunFailure — AMR/vela reclassification out of execution_fail
     expect(result?.user_action).toBe('recharge');
   });
 
+  it('classifies structured AMR tier entitlement failures as upgrade-required analytics', () => {
+    const result = classify(
+      'AMR_TIER_UPGRADE_REQUIRED',
+      'AMR tier upgrade required',
+    );
+
+    expect(result).toMatchObject({
+      failure_category: 'entitlement_required',
+      failure_detail: 'amr_tier_upgrade_required',
+      failure_stage: 'session_init',
+      retryable: false,
+      user_action: 'upgrade',
+    });
+  });
+
+  it('classifies raw AMR tier entitlement texts as upgrade-required analytics', () => {
+    const result = classify(
+      'AGENT_EXECUTION_FAILED',
+      'HTTP 403 [code=tier_model_not_entitled] model access denied for current tier',
+    );
+
+    expect(result).toMatchObject({
+      failure_category: 'entitlement_required',
+      failure_detail: 'amr_tier_upgrade_required',
+      failure_stage: 'session_init',
+      retryable: false,
+      user_action: 'upgrade',
+    });
+  });
+
   it('classifies a Chinese 429 rate-limit text as a retryable rate_limit_429', () => {
     const result = classify(
       'AGENT_EXECUTION_FAILED',
@@ -1345,6 +1378,19 @@ describe('classifyRunFailure — BYOK OpenCode reclassification out of stream_er
     const result = classify(
       'AGENT_EXECUTION_FAILED',
       'json-rpc id 4: opencode event stream: data did not match any variant of untagged enum InputParam',
+    );
+    expect(result).toMatchObject({
+      failure_category: 'upstream_unavailable',
+      failure_detail: 'upstream_client_error',
+      retryable: false,
+      user_action: 'none',
+    });
+  });
+
+  it('classifies BYOK OpenCode Responses API request rejections as non-retryable upstream client errors', () => {
+    const result = classify(
+      'AGENT_EXECUTION_FAILED',
+      'json-rpc id 4: opencode event stream: Invalid Responses API request',
     );
     expect(result).toMatchObject({
       failure_category: 'upstream_unavailable',

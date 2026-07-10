@@ -20,6 +20,7 @@ import net from 'node:net';
 import { executionProfileFromStreamFormat, PLUGIN_SHARE_ACTION_PLUGIN_IDS } from '@open-design/contracts';
 import {
   composeSystemPrompt,
+  renderConnectedExternalMcpDirective,
   resolveExclusiveSurface,
 } from './prompts/system.js';
 import { emittedRenderableQuestionForm } from './question-form-detect.js';
@@ -106,6 +107,7 @@ import {
 import {
   daemonAgentPayloadToPersistedAgentEvent,
   persistRunEventToAssistantMessage,
+  persistRunFailureClassification,
   pinAssistantMessageOnRunCreate,
 } from './runtimes/chat-run-messages.js';
 import {
@@ -181,6 +183,7 @@ import {
   getRememberedLiveModels,
   preferFreshLiveModels,
   rememberLiveModels,
+  resolveDefaultModelFromOptions,
   resolveModelForAgent,
 } from './runtimes/models.js';
 import { loadMmdRouteLaunchEnv } from './runtimes/mmd-routes.js';
@@ -3372,7 +3375,6 @@ export async function startServer({
     streamFormat,
     locale,
     sessionMode,
-    connectedExternalMcp,
     appliedPluginSnapshotId,
     mediaExecution,
     byokMediaDefaults,
@@ -3404,17 +3406,27 @@ export async function startServer({
     }
     const effectiveSkillId =
       typeof skillId === 'string' && skillId ? skillId : project?.skillId;
-    const designSystemSelection = resolveEffectiveDesignSystemSelection({
-      requestDesignSystemId: designSystemId,
-      pluginDesignSystemId,
-      projectDesignSystemId: project?.designSystemId,
-      appDefaultDesignSystemId: appConfigForPrompt?.designSystemId,
-      // A project row with designSystemId=null can mean the user picked
-      // "No design system"; do not reapply the global default behind their back.
-      allowAppDefault: project === null,
-    });
-    const effectiveDesignSystemId = designSystemSelection.id;
     const metadata = project?.metadata;
+    // Website Clone runs reproduce someone else's site: the fidelity target
+    // is the original page. Treating a project/app design system as
+    // authoritative would overwrite the cloned site's palette/typography
+    // with the user's brand, and universal craft rules would "improve"
+    // visual decisions the clone must preserve verbatim — so both prompt
+    // blocks are skipped for these runs. Step 6 of the skill (replace with
+    // the user's own content) is where brand application belongs.
+    const isWebCloneRun = metadata?.intent === 'web-clone';
+    const designSystemSelection = isWebCloneRun
+      ? { id: null, source: 'none' }
+      : resolveEffectiveDesignSystemSelection({
+          requestDesignSystemId: designSystemId,
+          pluginDesignSystemId,
+          projectDesignSystemId: project?.designSystemId,
+          appDefaultDesignSystemId: appConfigForPrompt?.designSystemId,
+          // A project row with designSystemId=null can mean the user picked
+          // "No design system"; do not reapply the global default behind their back.
+          allowAppDefault: project === null,
+        });
+    const effectiveDesignSystemId = designSystemSelection.id;
     let allSkillsPromise: ReturnType<typeof listAllSkillLikeEntries> | null = null;
     const loadAllSkills = async () => {
       allSkillsPromise ??= listAllSkillLikeEntries();
@@ -3567,6 +3579,39 @@ export async function startServer({
               skillName = local.name;
               activeSkillDir = local.dir;
               registerSkillDir(local.dir);
+            } else {
+              // The plugin references a shared global skill by id
+              // (`od.context.skills[{ ref: '<skill-id>' }]`) instead of
+              // shipping its own SKILL.md — resolve it from the global
+              // registry so the pinned plugin still gets the skill body AND
+              // its companion dir staged into the project cwd (scripts, etc).
+              // Lets many example plugins share one skill without each
+              // duplicating the SKILL.md and its scripts.
+              const skillRef = plugin.manifest?.od?.context?.skills?.find(
+                (ref): ref is { ref: string } =>
+                  typeof (ref as { ref?: unknown })?.ref === 'string'
+                  && (ref as { ref: string }).ref.trim().length > 0,
+              )?.ref?.trim();
+              if (skillRef) {
+                const allSkills = await loadAllSkills();
+                const refSkill = findSkillById(allSkills, skillRef);
+                if (refSkill) {
+                  skillBody = refSkill.body + composedSkillBlocks;
+                  skillName = refSkill.name;
+                  activeSkillDir = refSkill.dir;
+                  registerPrimarySkillMode(refSkill.mode);
+                  registerSkillDir(refSkill.dir);
+                  skillCritiquePolicy = mergeSkillCritiquePolicy(
+                    skillCritiquePolicy,
+                    refSkill.critiquePolicy,
+                  );
+                  if (Array.isArray(refSkill.craftRequires)) {
+                    for (const craft of refSkill.craftRequires) {
+                      if (!skillCraftRequires.includes(craft)) skillCraftRequires.push(craft);
+                    }
+                  }
+                }
+              }
             }
           }
         }
@@ -3691,9 +3736,12 @@ export async function startServer({
     }
 
     const excludedCraft = new Set(designSystemCraftExemptions);
-    const requestedCraft = Array.from(
-      new Set([...skillCraftRequires, ...designSystemCraftApplies]),
-    ).filter((slug) => !excludedCraft.has(slug));
+    // Web-clone fidelity exemption — see `isWebCloneRun` above.
+    const requestedCraft = isWebCloneRun
+      ? []
+      : Array.from(
+          new Set([...skillCraftRequires, ...designSystemCraftApplies]),
+        ).filter((slug) => !excludedCraft.has(slug));
     if (requestedCraft.length > 0) {
       const loaded = await loadCraftSections(CRAFT_DIR, requestedCraft);
       if (loaded.body) {
@@ -3888,9 +3936,6 @@ export async function startServer({
       byokMediaDefaults,
       streamFormat,
       executionProfile: executionProfileFromStreamFormat(streamFormat),
-      connectedExternalMcp: Array.isArray(connectedExternalMcp)
-        ? connectedExternalMcp
-        : undefined,
       ...(pluginBlock ? { pluginBlock } : {}),
       ...(activeStageBlocks ? { activeStageBlocks } : {}),
       userInstructions,
@@ -4384,7 +4429,6 @@ export async function startServer({
         streamFormat: def?.streamFormat ?? 'plain',
         locale,
         sessionMode: runSessionMode,
-        connectedExternalMcp,
         mediaExecution: run?.mediaExecution,
         byokMediaDefaults,
         // Plan §3.M2 / §3.V1 — forward the run's snapshot id so the
@@ -4561,14 +4605,10 @@ export async function startServer({
     let capturedSessionId: string | null = null;
     // --- Model resolution hoisted above the resume-identity guard ---
     // The guard (and the persisted `agent_sessions.model`) must key off the
-    // CONCRETE model actually launched, not the raw request token: a user who
-    // picked `default` would otherwise store `default`/null, so changing the
-    // effective default between turns would still pass the guard and resume the
-    // old upstream session under the wrong model (#4704, reported by @nettee).
-    // resolveModelForAgent is hoisted here; the AMR `default`->live-catalog
-    // rewrite is mirrored below so `safeModel` is final before the guard. The
-    // preflight further down stays authoritative for auth/availability and
-    // re-runs the (cached, idempotent) resolution.
+    // model identity actually requested for this turn. Explicit `default` is
+    // kept as a real identity because ACP runtimes can leave model selection to
+    // the upstream session's own configured default; omitted models may still
+    // resolve to an available fallback below.
     let configuredAgentEnv = {};
     try {
       const appConfig = await readAppConfig(RUNTIME_DATA_DIR);
@@ -4593,6 +4633,11 @@ export async function startServer({
       process.env,
       requestedLiveModelScope,
     );
+    const hasDefaultModelEnvOverride = Boolean(
+      def.defaultModelEnvVar &&
+      typeof process.env[def.defaultModelEnvVar] === 'string' &&
+      process.env[def.defaultModelEnvVar]?.trim(),
+    );
     const safeReasoning =
       typeof reasoning === 'string' && Array.isArray(def.reasoningOptions)
         ? (def.reasoningOptions.find((r) => r.id === reasoning)?.id ?? null)
@@ -4601,10 +4646,10 @@ export async function startServer({
     const agentLaunch = resolveAgentLaunch(def, configuredAgentEnv);
     const resolvedBin = agentLaunch.selectedPath;
     if (def.id === 'amr' && resolvedBin && agentLaunch.launchPath) {
-      // Concretize a default/empty model to the live catalog's first entry, the
-      // same rewrite the AMR preflight applies — done here only so the resume
-      // guard sees the launched model. Read-only + cached (hot on follow-up
-      // turns); the preflight below remains the authoritative gate.
+      // Concretize omitted/default AMR model requests to the live catalog
+      // default before the resume guard. The AMR preflight below applies the
+      // same rewrite before spawn; keeping this earlier copy aligned prevents
+      // stored concrete session models from comparing against raw `default`.
       try {
         const resumeProbe = await resolveAmrModelProbe({ dataDir: RUNTIME_DATA_DIR, env: process.env, readAppConfig });
         const resumeCatalog = await amrModelLoadingCache.get(resumeProbe.cacheKey, {
@@ -4618,8 +4663,18 @@ export async function startServer({
         const resumeModelIds = new Set(resumeLiveModels.map((c) => c?.id).filter(Boolean));
         const askedForDefault =
           typeof model !== 'string' || !model.trim() || model.trim().toLowerCase() === 'default';
-        if (!safeModel || safeModel === 'default' || (askedForDefault && !resumeModelIds.has(safeModel))) {
-          safeModel = resumeLiveModels[0]?.id ?? safeModel ?? null;
+        const defaultRunModel = resolveDefaultModelFromOptions(resumeLiveModels);
+        if (
+          !safeModel ||
+          safeModel === 'default' ||
+          (
+            askedForDefault &&
+            !hasDefaultModelEnvOverride &&
+            defaultRunModel &&
+            (!resumeModelIds.has(safeModel) || safeModel !== defaultRunModel)
+          )
+        ) {
+          safeModel = defaultRunModel ?? safeModel ?? null;
           agentOptions.model = safeModel;
         }
       } catch {
@@ -4686,9 +4741,16 @@ export async function startServer({
           'Do not mention this title task to the user. Continue with the normal answer after the title marker.',
         ].join('\n')
       : '';
+    // The connected-external-MCP directive reflects live OAuth token state,
+    // which flips mid-conversation as Bearers expire/refresh. Keeping it out of
+    // the cached stable prefix (daemonSystemPrompt) and re-sending it here in
+    // the per-turn slice keeps the upstream prompt-cache prefix byte-stable
+    // across resumes (protecting the conversation-history cache) while still
+    // giving the model the current MCP auth state on every turn.
+    const mcpConnectedDirective = renderConnectedExternalMcpDirective(connectedExternalMcp);
     const clientInstructionParts = includeStableInstructions
-      ? [researchCommandContract, runContextPrompt, browserUsePromptGuard, titleGenerationPrompt, systemPrompt]
-      : [researchCommandContract, runContextPrompt, browserUsePromptGuard, titleGenerationPrompt];
+      ? [researchCommandContract, runContextPrompt, mcpConnectedDirective, browserUsePromptGuard, titleGenerationPrompt, systemPrompt]
+      : [researchCommandContract, runContextPrompt, mcpConnectedDirective, browserUsePromptGuard, titleGenerationPrompt];
     const clientInstructionPrompt = clientInstructionParts
       .map((part) => (typeof part === 'string' ? part.trim() : ''))
       .filter(Boolean)
@@ -4944,6 +5006,13 @@ export async function startServer({
       run.error = null;
       run.errorCode = null;
       run.stdinOpen = false;
+      // Any run-scoped state that a single attempt writes and that later feeds
+      // terminal classification must be cleared before the next attempt spawns,
+      // or the prior attempt's verdict leaks forward. turnCompletedCleanly is
+      // set by a clean `turn_end` (applyClaudeStreamJsonRunBookkeeping); without
+      // this reset, a clean-but-empty attempt 1 would vouch for a crashed
+      // attempt 2, classifying the run 'succeeded' off a stale flag.
+      run.turnCompletedCleanly = false;
       lifecycle.resetForAttempt(run.retryAttemptCount ?? 0);
       run.analyticsTelemetry = {
         startRequestedAt: run.analyticsTelemetry?.startRequestedAt ?? run.createdAt,
@@ -5119,6 +5188,17 @@ export async function startServer({
         committedWorkSeen &&
         isResumableFailure(failure);
       run.resumable = resumableFailure;
+      // Surface the daemon's failure classification (already computed for
+      // retry-policy + telemetry) on the run so statusBody / the SSE `end` frame
+      // carry it to the chat, which maps failureDetail -> a specific named
+      // failure type + fix. Only meaningful on a failed result.
+      run.failureCategory = result === 'failed' ? failure?.failure_category ?? null : null;
+      run.failureDetail = result === 'failed' ? failure?.failure_detail ?? null : null;
+      // Stamp the classification onto the persisted assistant message too, so a
+      // reload (or any daemon-side persistence without the live web error
+      // handler) keeps the specific failure guidance instead of the coarse
+      // errorCode UI. Mirrors what statusBody / the SSE `end` frame carry live.
+      if (result === 'failed') persistRunFailureClassification(db, run);
       if (resumableFailure) {
         upsertAgentSession(db, {
           conversationId: run.conversationId,
@@ -5391,17 +5471,24 @@ export async function startServer({
       );
       // A request that came in as 'default'/empty is normally pre-resolved to a
       // concrete id via the agent-wide cached model order; if it still is not,
-      // adopt the first catalog entry so the spawn layer always has a real id.
+      // adopt the catalog's enabled default so the spawn layer always has a
+      // usable real id.
       const userAskedForDefault =
         typeof model !== 'string' ||
         !model.trim() ||
         model.trim().toLowerCase() === 'default';
+      const defaultRunModel = resolveDefaultModelFromOptions(liveModels);
       if (
         !safeModel ||
         safeModel === 'default' ||
-        (userAskedForDefault && !liveModelIds.has(safeModel))
+        (
+          userAskedForDefault &&
+          !hasDefaultModelEnvOverride &&
+          defaultRunModel &&
+          (!liveModelIds.has(safeModel) || safeModel !== defaultRunModel)
+        )
       ) {
-        safeModel = liveModels[0]?.id ?? safeModel ?? null;
+        safeModel = defaultRunModel ?? (safeModel === 'default' ? null : safeModel ?? null);
         agentOptions.model = safeModel;
       }
       if (liveModelIds.size === 0) {

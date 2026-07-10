@@ -104,9 +104,15 @@ import { playSound, showCompletionNotification } from '../utils/notifications';
 import { randomUUID } from '../utils/uuid';
 import { DEFAULT_NOTIFICATIONS } from '../state/config';
 import type { TodoItem } from '../runtime/todos';
-import { appendErrorStatusEvent, removeErrorStatusEvent } from '../runtime/chat-events';
+import {
+  appendErrorStatusEvent,
+  removeErrorStatusEvent,
+  runFailureFieldsFromError,
+} from '../runtime/chat-events';
+import type { RunFailureClassificationFields } from '../runtime/chat-events';
 import { RESUME_CONTINUE_PROMPT } from '../runtime/resume';
 import { checkAmrBalanceGate } from '../runtime/amr-balance-gate';
+import { resolveAmrLowBalancePlan } from '../runtime/amr-low-balance-plan';
 import { AmrBalanceDialog } from './AmrBalanceDialog';
 import { AmrLowBalanceDialog, type AmrLowBalanceDecision } from './AmrLowBalanceDialog';
 import {
@@ -1385,6 +1391,12 @@ export function ProjectView({
     detailedProject && detailedProject.updatedAt >= project.updatedAt ? detailedProject : project;
   const projectDesignSystemId = resolveProjectDesignSystemId(currentProject);
   const projectIsDesignSystemProject = isDesignSystemProject(currentProject);
+  // Website-clone turns reproduce a whole multi-page site; auto-open should
+  // land on the site entry (index.html), not the last-written subpage. See
+  // `SelectAutoOpenOptions.preferSiteEntry`.
+  const autoOpenArtifactOptions = {
+    preferSiteEntry: currentProject.metadata?.intent === 'web-clone',
+  };
   const designSystemBrandId = projectIsDesignSystemProject
     ? currentProject.metadata?.brandId?.trim() || null
     : null;
@@ -1640,7 +1652,11 @@ export function ProjectView({
   // Soft low-balance warning holding a pending send: the dialog resolves the
   // promise the gate is awaiting ('proceed' continues the very same send).
   const [amrLowBalanceWarn, setAmrLowBalanceWarn] = useState<
-    { snapshot: AmrWalletSnapshot; resolve: (decision: AmrLowBalanceDecision) => void } | null
+    {
+      snapshot: AmrWalletSnapshot;
+      plan: string | null;
+      resolve: (decision: AmrLowBalanceDecision) => void;
+    } | null
   >(null);
   // Conversations with a balance-gate check currently in flight. Sends that
   // arrive during the check queue instead of racing a duplicate run through
@@ -3337,11 +3353,16 @@ export function ProjectView({
   // rides along on the error status event so AssistantMessage can render the
   // hosted-AMR nudge for model/auth/quota failures on non-AMR agents.
   const appendAssistantErrorEvent = useCallback(
-    (messageId: string, message: string, code?: string) => {
+    (
+      messageId: string,
+      message: string,
+      code?: string,
+      failure?: RunFailureClassificationFields,
+    ) => {
       if (!message) return;
       updateMessageById(
         messageId,
-        (prev) => appendErrorStatusEvent(prev, message, code),
+        (prev) => appendErrorStatusEvent(prev, message, code, failure),
         true,
       );
     },
@@ -3848,7 +3869,7 @@ export function ProjectView({
             }
             const diff = computeProducedFiles(beforeFileNames, nextFiles) ?? [];
             const produced = mergeRecoveredArtifact(diff, recoveredExistingArtifact);
-            const producedArtifactToOpen = selectAutoOpenProducedArtifact(produced);
+            const producedArtifactToOpen = selectAutoOpenProducedArtifact(produced, autoOpenArtifactOptions);
             if (producedArtifactToOpen) requestOpenFile(producedArtifactToOpen);
             if (produced.length > 0) {
               updateMessageById(
@@ -4126,7 +4147,7 @@ export function ProjectView({
                   ) ?? [],
                   recoveredExistingArtifact,
                 );
-                const producedArtifactToOpen = selectAutoOpenProducedArtifact(produced);
+                const producedArtifactToOpen = selectAutoOpenProducedArtifact(produced, autoOpenArtifactOptions);
                 if (producedArtifactToOpen) requestOpenFile(producedArtifactToOpen);
                 updateMessageById(
                   message.id,
@@ -4144,6 +4165,7 @@ export function ProjectView({
               let skipFinalPersistNow = false;
               let retryFullReplayAfterCleanup = false;
               const genericDisconnect = isGenericDaemonDisconnect(err);
+              const failure = runFailureFieldsFromError(err);
               // A superseded reattached run must not paint a global failure
               // banner or re-finalize its message over the replacement run.
               const runMayFinalize =
@@ -4153,7 +4175,7 @@ export function ProjectView({
               unregisterTextBuffer();
               if (runMayFinalize) {
                 setError(err.message);
-                appendAssistantErrorEvent(message.id, err.message, errorCode);
+                appendAssistantErrorEvent(message.id, err.message, errorCode, failure);
                 updateMessageById(
                   message.id,
                   (prev) => ({
@@ -4214,7 +4236,7 @@ export function ProjectView({
                     if (produced.length > 0) {
                       recoveredArtifactMessagesRef.current.add(message.id);
                     }
-                    const producedArtifactToOpen = selectAutoOpenProducedArtifact(produced);
+                    const producedArtifactToOpen = selectAutoOpenProducedArtifact(produced, autoOpenArtifactOptions);
                     if (producedArtifactToOpen) requestOpenFile(producedArtifactToOpen);
                     if (latestRunStatus?.status === 'succeeded') setError(null);
                     // Unlike the recoverArtifacts sibling below, this row's
@@ -4576,7 +4598,7 @@ export function ProjectView({
             continue;
           }
           recoveredArtifactMessagesRef.current.add(message.id);
-          const producedArtifactToOpen = selectAutoOpenProducedArtifact(produced);
+          const producedArtifactToOpen = selectAutoOpenProducedArtifact(produced, autoOpenArtifactOptions);
           if (producedArtifactToOpen) requestOpenFile(producedArtifactToOpen);
           // This message's persisted runStatus was already terminal (a
           // precondition of hasRecoverableArtifactMessage); when it has no
@@ -4860,8 +4882,13 @@ export function ProjectView({
             // Low balance: pause THIS send while the reminder dialog waits
             // for a decision. 'proceed' resumes the very same send below —
             // a continuation, not a re-submit.
+            const plan = await resolveAmrLowBalancePlan(gate.snapshot);
+            if (messagesConversationIdRef.current !== activeConversationId) {
+              queueGateSend();
+              return false;
+            }
             const decision = await new Promise<AmrLowBalanceDecision>((resolve) => {
-              setAmrLowBalanceWarn({ snapshot: gate.snapshot, resolve });
+              setAmrLowBalanceWarn({ snapshot: gate.snapshot, plan, resolve });
             });
             setAmrLowBalanceWarn(null);
             // Same conversation-switch guard for the dialog-open window; the
@@ -5483,7 +5510,7 @@ export function ProjectView({
                 nextFiles,
                 traceTouchedFilePaths,
               ) ?? [];
-              const producedArtifactToOpen = selectAutoOpenProducedArtifact(produced);
+              const producedArtifactToOpen = selectAutoOpenProducedArtifact(produced, autoOpenArtifactOptions);
               if (producedArtifactToOpen) requestOpenFile(producedArtifactToOpen);
               setMessages((curr) => {
                 const updated = curr.map((m) =>
@@ -5524,6 +5551,7 @@ export function ProjectView({
           // directly, so the unconditional call at the bottom does not need
           // (and must not double-apply) that same update.
           let conversationFinalizedInline = false;
+          const failure = runFailureFieldsFromError(err);
           // A run superseded by a "send now" interrupt can still surface a
           // late disconnect error (e.g. a canceled stream that lost its
           // terminal SSE). It must not paint a global failure banner or
@@ -5536,7 +5564,7 @@ export function ProjectView({
           cancelSendTextBuffer();
           if (runMayFinalize) {
             setError(err.message);
-            appendAssistantErrorEvent(assistantId, err.message, errorCode);
+            appendAssistantErrorEvent(assistantId, err.message, errorCode, failure);
             updateAssistant((prev) => ({
               ...prev,
               endedAt,
@@ -8726,6 +8754,7 @@ export function ProjectView({
       {amrLowBalanceWarn ? (
         <AmrLowBalanceDialog
           balanceUsd={amrLowBalanceWarn.snapshot.balanceUsd}
+          plan={amrLowBalanceWarn.plan}
           profile={amrLowBalanceWarn.snapshot.profile}
           entrySource="chat_low_balance_warn_recharge"
           metricsConsent={config.telemetry?.metrics === true}
