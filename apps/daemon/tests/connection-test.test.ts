@@ -212,8 +212,18 @@ describe('POST /api/provider/models', () => {
       );
       return jsonResponse({
         data: [
-          { id: 'gpt-4o-mini', object: 'model' },
-          { id: 'gpt-4o', object: 'model' },
+          {
+            id: 'gpt-4o-mini',
+            object: 'model',
+            metadata: { cost: 'low', capability: 'standard' },
+            enabled: false,
+          },
+          {
+            id: 'gpt-4o',
+            object: 'model',
+            metadata: { cost: 'medium', capability: 'advanced' },
+            default: true,
+          },
           { id: 'gpt-4o', object: 'model' },
           { id: 'wan2-1-14b-t2v-250225', object: 'model' },
           { id: 'text-embedding-3-large', object: 'model' },
@@ -234,14 +244,31 @@ describe('POST /api/provider/models', () => {
     });
 
     expect(res.status).toBe(200);
-    await expect(res.json()).resolves.toMatchObject({
+    const body = (await res.json()) as {
+      ok: boolean;
+      kind: string;
+      models?: Array<Record<string, unknown>>;
+    };
+    expect(body).toMatchObject({
       ok: true,
       kind: 'success',
       models: [
-        { id: 'gpt-4o', label: 'gpt-4o' },
-        { id: 'gpt-4o-mini', label: 'gpt-4o-mini' },
+        {
+          id: 'gpt-4o',
+          label: 'gpt-4o',
+          metadata: { cost: 'medium', capability: 'advanced' },
+        },
+        {
+          id: 'gpt-4o-mini',
+          label: 'gpt-4o-mini',
+          metadata: { cost: 'low', capability: 'standard' },
+        },
       ],
     });
+    expect(body.models?.[0]?.enabled).toBeUndefined();
+    expect(body.models?.[0]?.default).toBeUndefined();
+    expect(body.models?.[1]?.enabled).toBeUndefined();
+    expect(body.models?.[1]?.default).toBeUndefined();
   });
 
   // Regression for #5367: a gateway's /models catalogue can list embedding
