@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import net from 'node:net';
 import { executionProfileFromStreamFormat, PLUGIN_SHARE_ACTION_PLUGIN_IDS } from '@open-design/contracts';
+import { isTodoWriteToolName, stopReasonIsTruncation, todoItemsFromTodoWriteInput } from '@open-design/contracts';
 import {
   composeSystemPrompt,
   renderConnectedExternalMcpDirective,
@@ -1180,6 +1181,27 @@ export function composeProjectDisplayStatus(
 
 const TERMINAL_RUN_STATUSES = new Set(['succeeded', 'failed', 'canceled']);
 const LANGFUSE_TERMINAL_FALLBACK_DELAY_MS = 15_000;
+
+// Fold per-run work-completeness signals off the agent event stream (#1247 /
+// #1060). Invoked for EVERY agent event via the single emitAgentEvent choke
+// point, so it covers every runtime (Claude stream, qoder, pi-rpc, ACP, …), not
+// just Claude:
+//   - the most recent TodoWrite snapshot's `todos` become run.lastTodoSnapshot,
+//     so finish() can judge whether declared work was left unfinished;
+//   - a turn-terminal event cut off by max_tokens sets run.truncatedMidTurn, so
+//     a truncated generation is flagged incomplete regardless of its todos.
+// Never keys off a mid-turn `tool_use` pause — only turn_end / usage terminals.
+function captureRunWorkCompletenessSignals(run, ev) {
+  if (!run || !ev || typeof ev !== 'object') return;
+  if (ev.type === 'tool_use' && isTodoWriteToolName(ev.name)) {
+    const todos = todoItemsFromTodoWriteInput(ev.input);
+    if (Array.isArray(todos)) run.lastTodoSnapshot = todos;
+    return;
+  }
+  if ((ev.type === 'turn_end' || ev.type === 'usage') && stopReasonIsTruncation(ev.stopReason)) {
+    run.truncatedMidTurn = true;
+  }
+}
 
 function fileNameFromToolInputPath(value) {
   if (typeof value !== 'string') return null;
@@ -5033,20 +5055,34 @@ export async function startServer({
     // drive a second close-handler pass that finalizes the run as failed before
     // the retry ever spawns.
     const tearDownAttemptForRetry = () => {
+      // Snapshot the failing attempt's child + process group BEFORE we detach
+      // them, so the reap targets THIS attempt's group and never the next one.
+      const priorChild = run.child;
+      const priorProcessGroupId = run.processGroupId;
       // Release the previous child's stdio streams before letting the
       // reference drop — see destroyChildStdio for rationale.
-      destroyChildStdio(run.child);
+      destroyChildStdio(priorChild);
+      // Disband the WHOLE process group of the failed attempt, not just the
+      // direct child. A same-run retry that only SIGTERMs run.child leaves the
+      // CLI's spawned descendants (MCP servers, tool subprocesses) orphaned
+      // (re-parented to PID 1), accumulating one leaked group per retry. Reap by
+      // the CAPTURED pgid — the SIGKILL escalation is bound to it, so it can
+      // never hit the next attempt's group (the cross-generation kill fixed in
+      // #5202). On win32 / no pgid, fall back to signalling the direct child.
+      const reaped = design.runs.reapProcessGroup(priorProcessGroupId);
       if (
-        run.child &&
-        typeof run.child.kill === 'function' &&
-        run.child.exitCode === null &&
-        !run.child.killed
+        !reaped &&
+        priorChild &&
+        typeof priorChild.kill === 'function' &&
+        priorChild.exitCode === null &&
+        !priorChild.killed
       ) {
-        try { run.child.kill('SIGTERM'); } catch {}
+        try { priorChild.kill('SIGTERM'); } catch {}
       }
       run.status = 'queued';
       run.updatedAt = Date.now();
       run.child = null;
+      run.processGroupId = null;
       run.acpSession = null;
       run.exitCode = null;
       run.signal = null;
@@ -6754,6 +6790,10 @@ export async function startServer({
     // follows the result that triggered it in the stream. (PR #3375 review:
     // Copilot and ACP bypassed the guard by calling send('agent', …) directly.)
     function emitAgentEvent(ev: any) {
+      // Fold work-completeness signals (TodoWrite snapshot / truncation) off the
+      // stream BEFORE the send, so run.lastTodoSnapshot / run.truncatedMidTurn are
+      // set by the time finish() derives run.endedWithUnfinishedWork (#1247/#1060).
+      captureRunWorkCompletenessSignals(run, ev);
       send('agent', ev);
       observeToolEventForLoop(ev);
     }
