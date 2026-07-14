@@ -111,6 +111,12 @@ import {
   runFailureFieldsFromError,
 } from '../runtime/chat-events';
 import type { RunFailureClassificationFields } from '../runtime/chat-events';
+import {
+  designDeliveryVerificationPending,
+  isRetryableAssistantTerminalFailure,
+  resolveDesignDeliveryOutcome,
+  type DesignDeliveryOutcome,
+} from '../runtime/design-delivery';
 import { RESUME_CONTINUE_PROMPT } from '../runtime/resume';
 import { checkAmrBalanceGate } from '../runtime/amr-balance-gate';
 import { resolveAmrLowBalancePlan } from '../runtime/amr-low-balance-plan';
@@ -1762,6 +1768,11 @@ export function ProjectView({
   const reattachControllersRef = useRef<Map<string, AbortController>>(new Map());
   const reattachCancelControllersRef = useRef<Map<string, AbortController>>(new Map());
   const completedReattachRunsRef = useRef<Set<string>>(new Set());
+  // A locally finished run briefly has terminal status before its async
+  // project-file refresh attaches delivery evidence. Do not let that same
+  // browser session reattach the run during this handoff; reattach remains
+  // the recovery path after a reload, where this in-memory set is empty.
+  const finalizingLocalRunIdsRef = useRef<Set<string>>(new Set());
   // Tracks transient null-status retry attempts per runId; bounded by
   // MAX_TRANSIENT_RETRIES so we never spin indefinitely on a persistently
   // missing run.
@@ -2249,7 +2260,11 @@ export function ProjectView({
     // file mutations or live artifacts.
     setDesignMdRefreshKey((n) => n + 1);
 
-    const status = last.runStatus;
+    const status =
+      last.resultDeliveryState === 'no_result' ||
+      last.resultDeliveryState === 'delivery_failed'
+        ? 'failed'
+        : last.runStatus;
     if (status !== 'succeeded' && status !== 'failed') return;
 
     const cfg = config.notifications ?? DEFAULT_NOTIFICATIONS;
@@ -2298,6 +2313,7 @@ export function ProjectView({
         continue;
       }
       if (message.runStatus !== 'succeeded' && message.runStatus !== 'failed') continue;
+      if (message.runStatus === 'succeeded' && designDeliveryVerificationPending(message)) continue;
       if (!keys.some((key) => activeCompletionNotificationRunsRef.current.has(key))) continue;
       if (keys.some((key) => completedNotificationRunsRef.current.has(key))) continue;
       for (const key of keys) completedNotificationRunsRef.current.add(key);
@@ -2567,10 +2583,12 @@ export function ProjectView({
           projectFiles: pointerProjectFiles,
         });
         if (pointerTarget) {
-          if (savedArtifactRef.current === pointerTarget) return;
+          if (savedArtifactRef.current === pointerTarget) {
+            return { ok: true as const, fileName: pointerTarget };
+          }
           savedArtifactRef.current = pointerTarget;
           requestOpenFile(pointerTarget);
-          return;
+          return { ok: true as const, fileName: pointerTarget };
         }
       }
       // Pre-write structural gate for HTML artifacts (#50, #1143). Reject
@@ -2581,11 +2599,16 @@ export function ProjectView({
       if (ext === '.html') {
         const validation = validateHtmlArtifact(artifactToPersist.html);
         if (!validation.ok) {
-          setError(`Refused to save artifact "${art.identifier || art.title || 'untitled'}": ${validation.reason}`);
-          return;
+          const message =
+            `Refused to save artifact "${art.identifier || art.title || 'untitled'}": ` +
+            validation.reason;
+          setError(message);
+          return { ok: false as const, error: message };
         }
       }
-      if (savedArtifactRef.current === fileName) return;
+      if (savedArtifactRef.current === fileName) {
+        return { ok: true as const, fileName };
+      }
       const title = art.title || art.identifier || fileName;
       const metadata = {
         identifier: art.identifier,
@@ -2630,6 +2653,7 @@ export function ProjectView({
         // sees it without an extra click. The Write-tool path already does
         // this for tool-emitted files; this handles the artifact-tag path.
         requestOpenFile(file.name);
+        return { ok: true as const, fileName: file.name };
       } else {
         // writeProjectTextFile collapses all failure paths (non-OK HTTP
         // responses, network errors, and stub-guard 422s) to null — the
@@ -2639,10 +2663,11 @@ export function ProjectView({
         // the structured details for any specific error type.
         // Clear the saved-artifact ref so the user can retry.
         savedArtifactRef.current = '';
-        setError(
+        const message =
           `Couldn't save artifact "${fileName}". The write failed — ` +
-            'check the daemon logs for details.',
-        );
+          'check the daemon logs for details.';
+        setError(message);
+        return { ok: false as const, error: message };
       }
     },
     [project.id, projectDesignSystemId, project.skillId, requestOpenFile],
@@ -3679,6 +3704,7 @@ export function ProjectView({
           );
           continue;
         }
+        if (finalizingLocalRunIdsRef.current.has(runId)) continue;
         if (reattachControllersRef.current.has(runId)) continue;
         if (completedReattachRunsRef.current.has(runId)) continue;
         const genericDisconnectBackoffUntil =
@@ -3852,6 +3878,8 @@ export function ProjectView({
               ? parsedArtifact
               : artifactFromStandaloneHtml(replayedContent);
             let recoveredExistingArtifact: ProjectFile | null = null;
+            let artifactPersistenceSucceeded = false;
+            let artifactPersistenceError: string | undefined;
             if (artifactToPersist?.html) {
               const producedBeforeFallback = computeProducedFiles(beforeFileNames, nextFiles) ?? [];
               const runStartedAt = status.createdAt || message.startedAt || message.createdAt;
@@ -3868,30 +3896,62 @@ export function ProjectView({
                   { minMtime: runStartedAt },
                 );
               if (recoveredExistingArtifact) {
+                artifactPersistenceSucceeded = true;
                 savedArtifactRef.current = recoveredExistingArtifact.name;
                 requestOpenFile(recoveredExistingArtifact.name);
               } else {
                 savedArtifactRef.current = null;
-                await persistArtifact(
+                const persistence = await persistArtifact(
                   artifactToPersist,
                   nextFiles,
                   replayedContent,
                   { pointerMinMtime: runStartedAt },
                 );
+                if (persistence.ok) artifactPersistenceSucceeded = true;
+                else artifactPersistenceError = persistence.error;
                 nextFiles = await refreshProjectFiles();
               }
             }
             const diff = computeProducedFiles(beforeFileNames, nextFiles) ?? [];
             const produced = mergeRecoveredArtifact(diff, recoveredExistingArtifact);
+            const traceObjectFiles = mergeRecoveredTraceObjectFile(
+              computeTraceObjectFiles(
+                beforeFileNames,
+                nextFiles,
+                extractTouchedFilePathsFromEvents(message.events),
+              ) ?? [],
+              recoveredExistingArtifact,
+            );
             const producedArtifactToOpen = selectAutoOpenProducedArtifact(produced, autoOpenArtifactOptions);
             if (producedArtifactToOpen) requestOpenFile(producedArtifactToOpen);
-            if (produced.length > 0) {
-              updateMessageById(
-                message.id,
-                (prev) => ({ ...prev, producedFiles: produced }),
-                true,
-                { telemetryFinalized: true },
-              );
+            const deliveryOutcome = resolveDesignDeliveryOutcome({
+              sessionMode: message.sessionMode,
+              runStatus: 'succeeded',
+              content: replayedContent,
+              events: message.events,
+              producedFileCount: produced.length,
+              traceObjectFileCount: traceObjectFiles.length,
+              persistenceSucceeded: artifactPersistenceSucceeded,
+              persistenceFailed: artifactPersistenceError !== undefined,
+            });
+            updateMessageById(
+              message.id,
+              (prev) =>
+                applyDesignDeliveryOutcome(
+                  {
+                    ...prev,
+                    content: replayedContent,
+                    producedFiles: produced,
+                    traceObjectFiles,
+                  },
+                  deliveryOutcome,
+                  artifactPersistenceError,
+                ),
+              true,
+              { telemetryFinalized: true },
+            );
+            if (deliveryOutcome === 'no_result' || deliveryOutcome === 'delivery_failed') {
+              setError(artifactPersistenceError ?? DESIGN_RESULT_MISSING_DETAIL);
             }
             await auditDesignSystemWorkspaceAfterRun(message.id);
             // Clear stale retry count for successfully recovered run.
@@ -4112,6 +4172,8 @@ export function ProjectView({
               void (async () => {
                 const preTurn = message.preTurnFileNames;
                 let nextFiles = await refreshProjectFiles();
+                let artifactPersistenceSucceeded = false;
+                let artifactPersistenceError: string | undefined;
                 // Use the turn-start snapshot when available so reload
                 // recovers files produced before the artifact write too;
                 // fall back to the current list for legacy messages.
@@ -4136,16 +4198,19 @@ export function ProjectView({
                       { minMtime: runStartedAt },
                     );
                   if (recoveredExistingArtifact) {
+                    artifactPersistenceSucceeded = true;
                     savedArtifactRef.current = recoveredExistingArtifact.name;
                     requestOpenFile(recoveredExistingArtifact.name);
                   } else {
                     savedArtifactRef.current = null;
-                    await persistArtifact(
+                    const persistence = await persistArtifact(
                       artifactToPersist,
                       nextFiles,
                       replayedContent,
                       { pointerMinMtime: runStartedAt },
                     );
+                    if (persistence.ok) artifactPersistenceSucceeded = true;
+                    else artifactPersistenceError = persistence.error;
                     nextFiles = await refreshProjectFiles();
                   }
                 }
@@ -4163,12 +4228,38 @@ export function ProjectView({
                 );
                 const producedArtifactToOpen = selectAutoOpenProducedArtifact(produced, autoOpenArtifactOptions);
                 if (producedArtifactToOpen) requestOpenFile(producedArtifactToOpen);
+                const deliveryContent = needsFullReplay ? replayedContent : message.content;
+                const deliveryEvents = needsFullReplay ? replayedEvents : message.events;
+                const deliveryOutcome = resolveDesignDeliveryOutcome({
+                  sessionMode: message.sessionMode,
+                  runStatus: 'succeeded',
+                  content: deliveryContent,
+                  events: deliveryEvents,
+                  producedFileCount: produced.length,
+                  traceObjectFileCount: traceObjectFiles.length,
+                  persistenceSucceeded: artifactPersistenceSucceeded,
+                  persistenceFailed: artifactPersistenceError !== undefined,
+                });
                 updateMessageById(
                   message.id,
-                  (prev) => ({ ...prev, producedFiles: produced, traceObjectFiles }),
+                  (prev) =>
+                    applyDesignDeliveryOutcome(
+                      {
+                        ...prev,
+                        content: deliveryContent,
+                        events: deliveryEvents,
+                        producedFiles: produced,
+                        traceObjectFiles,
+                      },
+                      deliveryOutcome,
+                      artifactPersistenceError,
+                    ),
                   true,
                   { telemetryFinalized: true },
                 );
+                if (deliveryOutcome === 'no_result' || deliveryOutcome === 'delivery_failed') {
+                  setError(artifactPersistenceError ?? DESIGN_RESULT_MISSING_DETAIL);
+                }
                 await auditDesignSystemWorkspaceAfterRun(message.id);
               })();
               onProjectsRefresh();
@@ -4270,6 +4361,8 @@ export function ProjectView({
                         ...prev,
                         content: replayedContent,
                         producedFiles: produced.length > 0 ? produced : prev.producedFiles,
+                        resultDeliveryState:
+                          produced.length > 0 ? 'delivered' : prev.resultDeliveryState,
                         runStatus: latestRunStatus?.status === 'succeeded' ? 'succeeded' : prev.runStatus,
                         endedAt:
                           latestRunStatus?.status === 'succeeded'
@@ -4626,6 +4719,7 @@ export function ProjectView({
               ...prev,
               content: sourceText,
               producedFiles: produced,
+              resultDeliveryState: 'delivered',
               runStatus:
                 latestRunStatus?.status === 'succeeded'
                   ? 'succeeded'
@@ -5006,6 +5100,7 @@ export function ProjectView({
         createdAt: startedAt,
         runStatus: config.mode === 'daemon' ? 'running' : undefined,
         startedAt,
+        sessionMode: runSessionMode,
         preTurnFileNames,
       };
       let latestAssistantMsg: ChatMessage = assistantMsg;
@@ -5448,6 +5543,8 @@ export function ProjectView({
               runStatus: finalRunStatus,
             };
           });
+          const finalizingRunId = currentRunId;
+          if (finalizingRunId) finalizingLocalRunIdsRef.current.add(finalizingRunId);
           if (runCommentAttachments.length > 0) {
             void patchAttachedStatuses(runCommentAttachments, 'needs_review');
           }
@@ -5464,6 +5561,8 @@ export function ProjectView({
           void (async () => {
             try {
               let nextFiles = await refreshProjectFiles();
+              let artifactPersistenceSucceeded = false;
+              let artifactPersistenceError: string | undefined;
               const finalText = streamedText || fullText;
               const artifactToPersist = parsedArtifact?.html
                 ? parsedArtifact
@@ -5489,10 +5588,13 @@ export function ProjectView({
                     });
                 const sameTurnWrite = sameTurnArtifactWrite ?? sameTurnHtmlWrite;
                 if (sameTurnWrite) {
+                  artifactPersistenceSucceeded = true;
                   savedArtifactRef.current = sameTurnWrite.name;
                   requestOpenFile(sameTurnWrite.name);
                 } else {
-                  await persistArtifact(artifactToPersist, nextFiles, finalText);
+                  const persistence = await persistArtifact(artifactToPersist, nextFiles, finalText);
+                  if (persistence.ok) artifactPersistenceSucceeded = true;
+                  else artifactPersistenceError = persistence.error;
                   nextFiles = await refreshProjectFiles();
                 }
               }
@@ -5526,19 +5628,49 @@ export function ProjectView({
               ) ?? [];
               const producedArtifactToOpen = selectAutoOpenProducedArtifact(produced, autoOpenArtifactOptions);
               if (producedArtifactToOpen) requestOpenFile(producedArtifactToOpen);
+              const deliveryCandidate: ChatMessage = {
+                ...latestAssistantMsg,
+                endedAt,
+                runStatus: finalRunStatus,
+                sessionMode: runSessionMode,
+                producedFiles: produced,
+                traceObjectFiles,
+              };
+              const deliveryOutcome = resolveDesignDeliveryOutcome({
+                sessionMode: deliveryCandidate.sessionMode,
+                runStatus: deliveryCandidate.runStatus,
+                content: deliveryCandidate.content,
+                events: deliveryCandidate.events,
+                producedFileCount: produced.length,
+                traceObjectFileCount: traceObjectFiles.length,
+                persistenceSucceeded: artifactPersistenceSucceeded,
+                persistenceFailed: artifactPersistenceError !== undefined,
+              });
+              const finalized = applyDesignDeliveryOutcome(
+                deliveryCandidate,
+                deliveryOutcome,
+                artifactPersistenceError,
+              );
+              latestAssistantMsg = finalized;
               setMessages((curr) => {
                 const updated = curr.map((m) =>
                   m.id === assistantId
-                    ? { ...m, producedFiles: produced, traceObjectFiles }
+                    ? finalized
                     : m,
                 );
-                const finalized = updated.find((m) => m.id === assistantId);
-                if (finalized) persistMessage(finalized, { telemetryFinalized: true });
+                persistMessage(finalized, { telemetryFinalized: true });
                 return updated;
               });
+              if (deliveryOutcome === 'no_result' || deliveryOutcome === 'delivery_failed') {
+                setError(artifactPersistenceError ?? DESIGN_RESULT_MISSING_DETAIL);
+                if (runCommentAttachments.length > 0) {
+                  void patchAttachedStatuses(runCommentAttachments, 'failed');
+                }
+              }
               await auditDesignSystemWorkspaceAfterRun(assistantId);
             } finally {
               clearTraceTouchedFilePaths();
+              if (finalizingRunId) finalizingLocalRunIdsRef.current.delete(finalizingRunId);
             }
           })();
           onProjectsRefresh();
@@ -9177,10 +9309,14 @@ function artifactFromRecoverableSourceText(sourceText: string): Artifact | null 
   };
 }
 
-function shouldReplayTerminalRunMessage(message: ChatMessage): boolean {
+export function shouldReplayTerminalRunMessage(message: ChatMessage): boolean {
   if (message.role !== 'assistant') return false;
   if (!message.runId) return false;
   if (message.runStatus !== 'succeeded') return false;
+  // A daemon can persist terminal success before the browser finishes its
+  // project-file refresh. Reattach once even when prose already exists so the
+  // delivery invariant can confirm a file or downgrade the turn after reload.
+  if (designDeliveryVerificationPending(message)) return true;
   if (message.content.trim().length > 0) return false;
   if (
     message.startedAt == null
@@ -9265,7 +9401,7 @@ export function resolveRetryTarget(
     (message) =>
       message.id === failedAssistantId &&
       message.role === 'assistant' &&
-      message.runStatus === 'failed',
+      isRetryableAssistantTerminalFailure(message),
   );
   if (failedIndex <= 0 || failedIndex !== messages.length - 1) return null;
 
@@ -9273,7 +9409,7 @@ export function resolveRetryTarget(
   while (
     userIndex >= 0 &&
     messages[userIndex]?.role === 'assistant' &&
-    messages[userIndex]?.runStatus === 'failed'
+    isRetryableAssistantTerminalFailure(messages[userIndex]!)
   ) {
     userIndex -= 1;
   }
@@ -9436,6 +9572,36 @@ function isStoppableAssistantMessage(message: ChatMessage): boolean {
 
 export function resolveSucceededRunStatus(status: ChatMessage['runStatus']): ChatMessage['runStatus'] {
   return status === 'failed' || status === 'canceled' ? status : 'succeeded';
+}
+
+const DESIGN_RESULT_MISSING_DETAIL =
+  'The design run finished without producing a deliverable project file.';
+const DESIGN_RESULT_DELIVERY_FAILED_DETAIL =
+  'The design result was generated, but Open Design could not save it to the project.';
+
+function applyDesignDeliveryOutcome(
+  message: ChatMessage,
+  outcome: DesignDeliveryOutcome,
+  persistenceError?: string,
+): ChatMessage {
+  if (outcome === 'delivered') {
+    return { ...message, resultDeliveryState: 'delivered' };
+  }
+  if (outcome !== 'no_result' && outcome !== 'delivery_failed') return message;
+  const detail =
+    outcome === 'delivery_failed'
+      ? persistenceError || DESIGN_RESULT_DELIVERY_FAILED_DETAIL
+      : DESIGN_RESULT_MISSING_DETAIL;
+  const failed = {
+    ...message,
+    resultDeliveryState: outcome,
+    resumable: false,
+  };
+  return appendErrorStatusEvent(
+    failed,
+    detail,
+    'ARTIFACT_NOT_FOUND',
+  );
 }
 
 export function computeProducedFiles(

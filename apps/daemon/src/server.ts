@@ -69,7 +69,7 @@ import {
   collectBrowserUseDiscoveryFacts,
   isBrowserUseRequested,
   renderBrowserUseUnavailablePrompt,
-} from './browser-use-diagnostics.js';
+} from './browser/index.js';
 import {
   UPLOAD_DIR,
   composeLiveInstructionPrompt,
@@ -413,7 +413,7 @@ import { buildDesktopArtifactExportInput, buildDesktopPdfExportInput } from './p
 import { generateMedia } from './media/index.js';
 import { listElevenLabsVoiceOptions } from './integrations/elevenlabs-voices.js';
 import { searchResearch, ResearchError } from './research/index.js';
-import { openBrowser } from './browser-open.js';
+import { openBrowser } from './browser/index.js';
 import {
   AUDIO_DURATIONS_SEC,
   AUDIO_MODELS_BY_KIND,
@@ -1156,6 +1156,38 @@ export function createAgentRuntimeToolPrompt(
     tokenLine,
     '- Prefer project wrapper commands through `OD_NODE_BIN` + `OD_BIN` over raw HTTP. The wrappers read these environment values automatically.',
   ].join('\n');
+}
+
+export function createOpenDesignToolEnv({
+  daemonUrl,
+  projectDir,
+  projectId,
+}: {
+  daemonUrl: string;
+  projectDir?: string | null;
+  projectId?: string | null;
+}): NodeJS.ProcessEnv {
+  return {
+    OD_BIN,
+    OD_DATA_DIR: RUNTIME_DATA_DIR,
+    OD_NODE_BIN,
+    OD_DAEMON_URL: daemonUrl,
+    ...(typeof projectId === 'string' && projectId && projectDir
+      ? {
+          OD_PROJECT_ID: projectId,
+          OD_PROJECT_DIR: projectDir,
+        }
+      : {}),
+  };
+}
+
+export function createDaemonDataDirConfiguredAgentEnv(
+  configuredAgentEnv: Record<string, string> = {},
+): Record<string, string> {
+  return {
+    ...configuredAgentEnv,
+    OD_DATA_DIR: RUNTIME_DATA_DIR,
+  };
 }
 
 export function normalizeProjectDisplayStatus(status) {
@@ -6088,6 +6120,7 @@ export async function startServer({
           OD_BROWSER_USE_REGISTRY_PATH: run.browserUse.diagnostics?.registryPath ?? '',
         }
       : {};
+    const configuredAgentSpawnEnv = createDaemonDataDirConfiguredAgentEnv(configuredAgentEnv);
     const agentSpawnEnv = spawnEnvForAgent(
       def.id,
       {
@@ -6095,12 +6128,12 @@ export async function startServer({
         ...(def.env || {}),
         ...browserUseRuntimeEnv,
       },
-      configuredAgentEnv,
+      configuredAgentSpawnEnv,
       undefined,
       { resolvedBin: agentLaunch.selectedPath },
     );
     if (def.id === 'amr') {
-      const loginStatus = readVelaLoginStatus(agentSpawnEnv, configuredAgentEnv);
+      const loginStatus = readVelaLoginStatus(agentSpawnEnv, configuredAgentSpawnEnv);
       if (!loginStatus.loggedIn) {
         cleanupPromptFile();
         revokeToolToken('child_exit');
@@ -6113,17 +6146,11 @@ export async function startServer({
         return design.runs.finish(run, 'failed', 1, null);
       }
     }
-    const odMediaEnv = {
-      OD_BIN,
-      OD_NODE_BIN,
-      OD_DAEMON_URL: daemonUrl,
-      ...(typeof projectId === 'string' && projectId && cwd
-        ? {
-            OD_PROJECT_ID: projectId,
-            OD_PROJECT_DIR: cwd,
-          }
-        : {}),
-    };
+    const odMediaEnv = createOpenDesignToolEnv({
+      daemonUrl,
+      projectDir: cwd,
+      projectId: typeof projectId === 'string' ? projectId : null,
+    });
     if (run.cancelRequested || design.runs.isTerminal(run.status)) {
       cleanupPromptFile();
       revokeToolToken('child_exit');
@@ -7351,7 +7378,7 @@ export async function startServer({
         markRpcCloseReason('empty_output');
         send('error', createSseErrorPayload(
           'AGENT_EXECUTION_FAILED',
-          'Agent completed without producing any output. The model or provider may have returned an empty response — check the agent logs for upstream errors.',
+          'Agent completed without producing any output. The model or provider may have returned an empty response. Check the agent logs for upstream errors, then try re-authenticating the agent, checking quota, or switching models.',
           { retryable: true },
         ));
         return finishWithRetryDecision('failed', code, signal);
