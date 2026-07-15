@@ -5,7 +5,12 @@ import {
   renderMarkdown,
   type MarkdownLinkClickHandler,
 } from "../runtime/markdown";
-import { asInProjectFilePath } from "../runtime/in-project-link";
+import {
+  asInProjectFilePath,
+  isPathLikeChatHref,
+  resolveChatFileLink,
+} from "../runtime/in-project-link";
+import { navigate } from "../router";
 import { projectFileUrl } from "../providers/registry";
 import { useAnalytics } from "../analytics/provider";
 import {
@@ -28,6 +33,7 @@ import {
   type TrackingProjectKind,
 } from "@open-design/contracts/analytics";
 import {
+  hasUnterminatedQuestionForm,
   splitOnQuestionForms,
   stripTrailingOpenQuestionForm,
   type QuestionForm,
@@ -321,6 +327,11 @@ interface Props {
   projectFiles?: ProjectFile[];
   projectMetadata?: ProjectMetadata;
   projectFileNames?: Set<string>;
+  // Daemon-resolved on-disk working directory of the current project
+  // (`GET /api/projects/:id` → `resolvedDir`). Positive-proof anchor for
+  // classifying absolute disk hrefs in chat file links — see
+  // `resolveChatFileLink`.
+  projectResolvedDir?: string | null;
   onRequestOpenFile?: (name: string) => void;
   // Client-side action for a <od-card type="brand-browser-assist"> button: open
   // or focus the Browser tab so the user can clear verification. Excluded from
@@ -402,6 +413,7 @@ const ASSISTANT_MESSAGE_COMPARED_PROPS: Array<keyof Props> = [
   'projectFiles',
   'projectMetadata',
   'projectFileNames',
+  'projectResolvedDir',
   'onRequestOpenFile',
   'onRequestPluginFolderAgentAction',
   'activePluginActionPaths',
@@ -465,6 +477,7 @@ function AssistantMessageImpl({
   projectFiles = [],
   projectMetadata,
   projectFileNames,
+  projectResolvedDir,
   onRequestOpenFile,
   onBrandBrowserAssistConfirm,
   onRequestPluginFolderAgentAction,
@@ -500,6 +513,12 @@ function AssistantMessageImpl({
   nextStepVariant = 'default',
 }: Props) {
   const t = useT();
+  // Thinking text renders markdown too — its file links must route in-app
+  // exactly like prose links (ProseBlock builds the same handler itself).
+  const thinkingLinkClick = useMemo(
+    () => chatFileLinkClickHandler(onRequestOpenFile, projectFileNames, projectId, projectResolvedDir),
+    [onRequestOpenFile, projectFileNames, projectId, projectResolvedDir],
+  );
   const events =
     (message.events?.length ?? 0) > 0
       ? message.events!
@@ -770,6 +789,7 @@ function AssistantMessageImpl({
                 conversationId={conversationId}
                 runId={message.runId ?? null}
                 projectFileNames={projectFileNames}
+                projectResolvedDir={projectResolvedDir}
                 onRequestOpenFile={onRequestOpenFile}
                 onBrandBrowserAssistConfirm={onBrandBrowserAssistConfirm}
               />
@@ -783,6 +803,7 @@ function AssistantMessageImpl({
                 key={i}
                 text={b.text}
                 streaming={streaming && i === blocks.length - 1}
+                onLinkClick={thinkingLinkClick}
               />
             );
           if (b.kind === "tool-group") {
@@ -2275,6 +2296,45 @@ function hasPluginFinalActionHint(content: string): boolean {
   );
 }
 
+/**
+ * Build the markdown link-click handler that keeps chat file links inside
+ * the app. Current-project files open through the workspace tab opener;
+ * files of another project (e.g. an @-referenced project linked by absolute
+ * disk path or app route) navigate to that project's file route in the same
+ * window; any remaining path-like href is swallowed, because its only
+ * default outcome is a detached Electron window rendering the home screen
+ * (0.14.1 acceptance bug: chatpane file links opened a home-page window). External URLs keep their default behavior.
+ *
+ * The handler is ALWAYS installed: only the workspace-file open action needs
+ * `onRequestOpenFile`. Surfaces that mount the chat without a workspace
+ * opener (e.g. the design-system chat in `DesignSystemFlow`) still must
+ * navigate cross-project targets and swallow unresolvable path-like hrefs —
+ * returning no handler there would reintroduce the detached home window for
+ * every file link.
+ */
+function chatFileLinkClickHandler(
+  onRequestOpenFile: ((name: string) => void) | undefined,
+  projectFileNames: ReadonlySet<string> | undefined,
+  projectId: string | null | undefined,
+  projectResolvedDir?: string | null,
+): MarkdownLinkClickHandler {
+  return (href, event) => {
+    const target = resolveChatFileLink(href, projectFileNames, projectId, projectResolvedDir);
+    if (target) {
+      event.preventDefault();
+      if (target.kind === "workspace-file") {
+        // Without a workspace opener the click stays swallowed: there is no
+        // pane that can preview the current project's file on this surface,
+        // and the default fallback would only open the home-page window.
+        onRequestOpenFile?.(target.filePath);
+      } else {
+        navigate({ kind: "project", projectId: target.projectId, fileName: target.filePath });
+      }
+      return;
+    }
+    if (isPathLikeChatHref(href)) event.preventDefault();
+  };
+}
 
 function ProseBlock({
   text,
@@ -2290,6 +2350,7 @@ function ProseBlock({
   conversationId,
   runId,
   projectFileNames,
+  projectResolvedDir,
   onRequestOpenFile,
   onBrandBrowserAssistConfirm,
 }: {
@@ -2305,6 +2366,7 @@ function ProseBlock({
   conversationId?: string | null;
   runId?: string | null;
   projectFileNames?: Set<string>;
+  projectResolvedDir?: string | null;
   onOpenQuestions?: (request?: QuestionFormOpenRequest) => void;
   onRequestOpenFile?: (name: string) => void;
   onBrandBrowserAssistConfirm?: BrandBrowserAssistConfirm;
@@ -2336,19 +2398,14 @@ function ProseBlock({
     [visibleText, streaming]
   );
   const segments = useMemo(() => splitOnQuestionForms(head), [head]);
-  // Route relative file-link clicks (`template.html`, `subdir/hero.html`)
-  // through the workspace tab opener. Without this, Electron's window-open
-  // handler creates a new app window whose relative href can't resolve, and
-  // the user lands on the home screen — the file is never previewed.
-  const onLinkClick = useMemo<MarkdownLinkClickHandler | undefined>(() => {
-    if (!onRequestOpenFile) return undefined;
-    return (href, event) => {
-      const path = asInProjectFilePath(href, projectFileNames, projectId);
-      if (!path) return;
-      event.preventDefault();
-      onRequestOpenFile(path);
-    };
-  }, [onRequestOpenFile, projectFileNames, projectId]);
+  // Route file-link clicks away from the default target="_blank" behavior.
+  // Without this, Electron's window-open handler creates a new app window
+  // whose href can't resolve, and the user lands on the home screen — the
+  // file is never previewed (issue #1239 and the 0.14.1 chatpane file-link acceptance bug).
+  const onLinkClick = useMemo<MarkdownLinkClickHandler>(
+    () => chatFileLinkClickHandler(onRequestOpenFile, projectFileNames, projectId, projectResolvedDir),
+    [onRequestOpenFile, projectFileNames, projectId, projectResolvedDir],
+  );
   // Each text segment is further split on `<od-card>` blocks (so memory cards
   // render inline, composing with the surrounding question-form handling) and
   // then on `<system-reminder>` blocks (so those render as their own
@@ -2558,7 +2615,15 @@ function SystemReminderBlock({
   );
 }
 
-function ThinkingBlock({ text, streaming }: { text: string; streaming?: boolean }) {
+function ThinkingBlock({
+  text,
+  streaming,
+  onLinkClick,
+}: {
+  text: string;
+  streaming?: boolean;
+  onLinkClick?: MarkdownLinkClickHandler;
+}) {
   const t = useT();
   const [open, setOpen] = useState(false);
   const isThinking = streaming === true;
@@ -2600,7 +2665,7 @@ function ThinkingBlock({ text, streaming }: { text: string; streaming?: boolean 
       </button>
       <div className={`accordion-collapsible${open ? ' open' : ''}`}>
         <div className="accordion-collapsible-inner">
-          <div className="thinking-body">{renderMarkdown(text)}</div>
+          <div className="thinking-body">{renderMarkdown(text, { onLinkClick })}</div>
         </div>
       </div>
     </div>

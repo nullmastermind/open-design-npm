@@ -363,7 +363,7 @@ async function measureSlideStage(window: BrowserWindow): Promise<Stage> {
 // matters for long decks where the loop dominates.
 async function showDeckSlide(window: BrowserWindow, i: number, stage: Stage): Promise<void> {
   const rect = (await window.webContents.executeJavaScript(
-    `(${showSlide.toString()})(${JSON.stringify(SLIDE_SELECTOR)}, ${i})`,
+    `(() => { const restoreActiveSlideCapture = ${restoreActiveSlideCapture.toString()}; return (${showSlide.toString()})(${JSON.stringify(SLIDE_SELECTOR)}, ${i}); })()`,
     true,
   )) as { x: number; y: number; w: number; h: number } | null;
   // If the active slide did not land in the top-left capture viewport (a
@@ -377,7 +377,7 @@ async function showDeckSlide(window: BrowserWindow, i: number, stage: Stage): Pr
     rect.h >= stage.h * 0.5;
   if (!onStage) {
     await window.webContents.executeJavaScript(
-      `(() => { const activeSlideCaptureOffsetTransform = ${activeSlideCaptureOffsetTransform.toString()}; return (${restackActiveSlide.toString()})(${JSON.stringify(SLIDE_SELECTOR)}, ${i}, ${stage.w}, ${stage.h}); })()`,
+      `(() => { const activeSlideCaptureOffsetTransform = ${activeSlideCaptureOffsetTransform.toString()}; const restoreActiveSlideCapture = ${restoreActiveSlideCapture.toString()}; return (${restackActiveSlide.toString()})(${JSON.stringify(SLIDE_SELECTOR)}, ${i}, ${stage.w}, ${stage.h}); })()`,
       true,
     );
     await nextFrames(window);
@@ -427,8 +427,9 @@ async function renderEditablePptx(
 // cannot return a stale composited frame of the previous slide — the
 // duplicate-page race `capturePage` exhibits); falls back to `capturePage` when
 // the debugger isn't attached. `scale: 1` because the window's device-pixel
-// ratio already provides the pixel scale (avoids double-scaling).
-async function captureDeckSlide(
+// ratio already provides the pixel scale (avoids double-scaling). Exported so
+// focused tests can exercise the real selection/restack/capture orchestration.
+export async function captureDeckSlide(
   window: BrowserWindow,
   dbg: Electron.Debugger | null,
   i: number,
@@ -1289,10 +1290,34 @@ function positiveCssNumber(value: unknown): number | null {
   return Number.isFinite(n) && n > 1 ? n : null;
 }
 
+// Restores the live slide moved into the capture layer before the next slide is
+// selected. The temporary style overrides are capture-only and must not leak
+// into later selector/index passes.
+export function restoreActiveSlideCapture(): void {
+  const layer = document.getElementById("__od_export_active_slide_capture") as
+    | (HTMLElement & {
+        __odSourceStyles?: Array<{ name: string; priority: string; value: string }>;
+      })
+    | null;
+  if (!layer) return;
+  const placeholder = document.getElementById("__od_export_active_slide_placeholder");
+  const liveSlide = layer.firstElementChild?.firstElementChild as HTMLElement | null;
+  if (placeholder?.parentNode && liveSlide) {
+    placeholder.parentNode.moveBefore(liveSlide, placeholder);
+    placeholder.remove();
+    for (const { name, priority, value } of layer.__odSourceStyles ?? []) {
+      if (value) liveSlide.style.setProperty(name, value, priority);
+      else liveSlide.style.removeProperty(name);
+    }
+  }
+  layer.remove();
+}
+
 // Returns a Promise that resolves after the style change has settled for two
 // animation frames, so the caller can show + wait in a single round trip.
-function showSlide(slideSelector: string, index: number): Promise<{ x: number; y: number; w: number; h: number } | null> {
-  document.getElementById("__od_export_active_slide_capture")?.remove();
+// Exported so focused tests can drive the real per-slide selection.
+export function showSlide(slideSelector: string, index: number): Promise<{ x: number; y: number; w: number; h: number } | null> {
+  restoreActiveSlideCapture();
   const slides = Array.prototype.slice
     .call(document.querySelectorAll(slideSelector))
     .filter((el) => !(el as HTMLElement).closest(".mini-slide, .overview, .notes-overlay, .thumb"));
@@ -1300,16 +1325,35 @@ function showSlide(slideSelector: string, index: number): Promise<{ x: number; y
   // the slide (incl. visibility:hidden->visible and reveal animations), plus
   // inline overrides as a backstop for decks that hide via opacity/visibility.
   const activeClasses = ["active", "visible", "is-active", "current"];
+  // The injected <deck-stage> fallback (packages/contracts/src/runtime/
+  // deck-stage-fallback.ts) hides slotted slides with an `!important` shadow rule
+  // and reveals ONLY the one carrying `data-od-deck-active`. We toggle exactly that
+  // attribute. We do NOT also set the real deck-stage.js runtime's
+  // `data-deck-active`: it is unnecessary for reveal (mechanism 1 below already
+  // reveals that runtime's slides), and skipping it keeps the export from depending
+  // on the prepareDeckStage() animation freeze to neutralize any authored
+  // `[data-deck-active]`-keyed entrance motion.
+  const activeAttributes = ["data-od-deck-active"];
   slides.forEach((node, k) => {
     const el = node as HTMLElement;
     const on = k === index;
-    el.style.transition = "none";
-    el.style.animation = "none";
-    el.style.opacity = on ? "1" : "0";
-    el.style.visibility = on ? "visible" : "hidden";
-    el.style.pointerEvents = on ? "auto" : "none";
-    el.style.zIndex = on ? "999" : "0";
+    // Reveal the captured slide through the two mechanisms real decks actually use:
+    //   1. Inline `!important` styles beat a deck's own NON-important hide rules —
+    //      the real <deck-stage> runtime's `::slotted(*){visibility:hidden}` and
+    //      class-based `.slide` decks — because importance wins outright there.
+    //   2. The `data-od-deck-active` attribute is the ONLY thing that reveals the
+    //      fallback, whose hide rule is `::slotted(*){visibility:hidden!important}`
+    //      in its shadow root: a shadow-tree `!important` declaration beats an outer
+    //      inline `!important` one (for `!important`, the inner context wins), so
+    //      inline styles alone cannot reveal a fallback slide — the attribute can.
+    el.style.setProperty("transition", "none", "important");
+    el.style.setProperty("animation", "none", "important");
+    el.style.setProperty("opacity", on ? "1" : "0", "important");
+    el.style.setProperty("visibility", on ? "visible" : "hidden", "important");
+    el.style.setProperty("pointer-events", on ? "auto" : "none", "important");
+    el.style.setProperty("z-index", on ? "999" : "0", "important");
     activeClasses.forEach((c) => el.classList.toggle(c, on));
+    activeAttributes.forEach((a) => el.toggleAttribute(a, on));
   });
   // Report where the active slide actually landed after two frames, so the
   // capturer can detect a slide that the deck keeps off-screen (e.g. a
@@ -1327,19 +1371,21 @@ function showSlide(slideSelector: string, index: number): Promise<{ x: number; y
   });
 }
 
-// Serialized into the page: overlays a capture-only clone of the active slide in
-// the top-left viewport for decks that position the real slide elsewhere
-// (translated carousel strip). The real DOM tree is left intact: authored
-// transforms on the slide or its wrappers must continue to affect layout exactly
-// as they do in the preview.
-function restackActiveSlide(slideSelector: string, index: number, w: number, h: number): void {
-  document.getElementById("__od_export_active_slide_capture")?.remove();
+// Serialized into the page: temporarily moves the live active slide into a
+// capture-only layer for decks that position it outside the viewport (translated
+// carousel strip). A state-preserving DOM move rather than cloning keeps
+// canvas/WebGL bitmaps, media frames, iframe browsing state, and other runtime
+// content continuously connected in the only paintable subtree. Align from its
+// live rect after insertion: moving outside a translated parent drops that
+// parent's transform, so reusing the source rect would apply the lost offset a
+// second time.
+export function restackActiveSlide(slideSelector: string, index: number, w: number, h: number): void {
+  restoreActiveSlideCapture();
   const slides = Array.prototype.slice
     .call(document.querySelectorAll(slideSelector))
     .filter((el) => !(el as HTMLElement).closest(".mini-slide, .overview, .notes-overlay, .thumb"));
   const el = slides[index] as HTMLElement | undefined;
   if (!el) return;
-  const rect = el.getBoundingClientRect();
   const layer = document.createElement("div");
   layer.id = "__od_export_active_slide_capture";
   layer.setAttribute("aria-hidden", "true");
@@ -1363,16 +1409,27 @@ function restackActiveSlide(slideSelector: string, index: number, w: number, h: 
     "top:0",
     `width:${w}px`,
     `height:${h}px`,
-    `transform:${activeSlideCaptureOffsetTransform(rect)}`,
     "transform-origin:top left",
   ].join("!important;") + "!important";
 
-  const clone = el.cloneNode(true) as HTMLElement;
-  clone.style.setProperty("opacity", "1", "important");
-  clone.style.setProperty("visibility", "visible", "important");
-  clone.style.setProperty("pointer-events", "none", "important");
-  clone.style.setProperty("z-index", "2147483647", "important");
-  offset.appendChild(clone);
+  const sourceStyleNames = ["opacity", "visibility", "pointer-events", "z-index"];
+  (layer as typeof layer & {
+    __odSourceStyles: Array<{ name: string; priority: string; value: string }>;
+  }).__odSourceStyles = sourceStyleNames.map((name) => ({
+    name,
+    priority: el.style.getPropertyPriority(name),
+    value: el.style.getPropertyValue(name),
+  }));
+  const placeholder = document.createElement("template");
+  placeholder.id = "__od_export_active_slide_placeholder";
+  el.before(placeholder);
   layer.appendChild(offset);
   document.body.appendChild(layer);
+  el.style.setProperty("opacity", "1", "important");
+  el.style.setProperty("visibility", "visible", "important");
+  el.style.setProperty("pointer-events", "none", "important");
+  el.style.setProperty("z-index", "2147483647", "important");
+  offset.moveBefore(el, null);
+  const liveRect = el.getBoundingClientRect();
+  offset.style.setProperty("transform", activeSlideCaptureOffsetTransform(liveRect), "important");
 }
