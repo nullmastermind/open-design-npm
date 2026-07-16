@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { OpenDesignHostUpdaterStatusSnapshot } from '@open-design/host';
 import { installMockOpenDesignHost } from '@open-design/host/testing';
@@ -277,10 +277,14 @@ function renderSettingsDialog(
     appVersionInfo?: AppVersionInfo | null;
     providerModelsCache?: Record<string, ProviderModelOption[]>;
     welcome?: boolean;
+    onSilentUpdatePreferenceChange?: (allowSilentUpdates: boolean) => Promise<void>;
   } = {},
 ) {
   const onPersist = vi.fn();
   const onPersistComposioKey = vi.fn();
+  const onSilentUpdatePreferenceChange: (allowSilentUpdates: boolean) => Promise<void> =
+    options.onSilentUpdatePreferenceChange
+    ?? (async () => undefined);
   const onClose = vi.fn();
   const onRefreshAgents = options.onRefreshAgents ?? vi.fn<OnRefreshAgents>();
 
@@ -294,13 +298,21 @@ function renderSettingsDialog(
       providerModelsCache={options.providerModelsCache}
       welcome={options.welcome}
       onPersist={onPersist}
+      onSilentUpdatePreferenceChange={onSilentUpdatePreferenceChange}
       onPersistComposioKey={onPersistComposioKey}
       onClose={onClose}
       onRefreshAgents={onRefreshAgents}
     />,
   );
 
-  return { onPersist, onPersistComposioKey, onClose, onRefreshAgents, ...view };
+  return {
+    onPersist,
+    onSilentUpdatePreferenceChange,
+    onPersistComposioKey,
+    onClose,
+    onRefreshAgents,
+    ...view,
+  };
 }
 
 function renderIntegrationsView(

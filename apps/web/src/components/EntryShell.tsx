@@ -372,6 +372,10 @@ interface Props {
   onApiProtocolChange: (protocol: ApiProtocol) => void;
   onApiModelChange: (model: string) => void;
   onConfigPersist: (cfg: AppConfig) => Promise<void> | void;
+  /** True only when GET /api/app-config returned a real config object. */
+  daemonAppConfigReady?: boolean;
+  /** Non-optimistic daemon write for the silent-update preference. */
+  onSilentUpdatePreferenceChange?: (allowSilentUpdates: boolean) => Promise<void>;
   onSkillsRefresh?: () => Promise<void> | void;
   onSkillsChanged?: (affectedSkillId?: string) => void;
   onRefreshAgents: () => Promise<AgentInfo[]> | AgentInfo[];
@@ -488,6 +492,8 @@ export function EntryShell({
   onApiProtocolChange,
   onApiModelChange,
   onConfigPersist,
+  daemonAppConfigReady = false,
+  onSilentUpdatePreferenceChange,
   onSkillsRefresh,
   onSkillsChanged,
   onRefreshAgents,
@@ -579,6 +585,12 @@ export function EntryShell({
   // §7.1). Cleared as soon as the user takes any concrete entry (spec §7.4).
   const [onboardingRec, setOnboardingRec] = useState<Recommendation | null>(null);
   const entryMainScrollRef = useRef<HTMLElement | null>(null);
+  // Entry views share this element, so route changes must not inherit the previous view's offset.
+  useLayoutEffect(() => {
+    const scrollContainer = entryMainScrollRef.current;
+    if (!scrollContainer) return;
+    scrollContainer.scrollTop = 0;
+  }, [view]);
   const analytics = useAnalytics();
   function changeView(next: EntryViewKind) {
     const navElement = navElementForView(next);
@@ -990,8 +1002,10 @@ export function EntryShell({
             </div>
             <UpdaterPopup
               allowSilentUpdates={config.allowSilentUpdates}
-              onAllowSilentUpdatesChange={(allowSilentUpdates) =>
-                onConfigPersist({ ...config, allowSilentUpdates })
+              silentUpdatePreferenceReady={daemonAppConfigReady}
+              onAllowSilentUpdatesChange={
+                onSilentUpdatePreferenceChange
+                  ?? ((allowSilentUpdates) => onConfigPersist({ ...config, allowSilentUpdates }))
               }
             />
             <WhatsNewPopup active={view === 'home'} />
