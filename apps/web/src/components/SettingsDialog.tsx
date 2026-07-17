@@ -303,8 +303,8 @@ export function deriveAboutUpdateControl(
           primaryAction: 'quit',
           primaryLabelKey: 'updater.quitButton',
           showReleaseLink: false,
-          statusKey: 'settings.updateQuitFailed',
-          statusTone: 'warning',
+          statusKey: model.updateKind === 'payload' ? 'updater.installingRestart' : 'updater.opening',
+          statusTone: 'neutral',
         };
       }
       const canInstallUpdate = model.canOpenInstaller || model.canApplyInPlace;
@@ -331,14 +331,22 @@ export function deriveAboutUpdateControl(
         statusKey: 'settings.updateStatusInstalling',
         statusTone: 'neutral',
       };
-    case 'error':
+    case 'error': {
+      const canRetryInstall = model.status.downloadPath != null
+        && (model.canOpenInstaller || model.canApplyInPlace);
+      const primaryAction: AboutUpdatePrimaryAction = canRetryInstall
+        ? 'install'
+        : model.availableVersion != null && model.canDownload
+          ? 'download'
+          : 'check';
       return {
-        primaryAction: 'check',
+        primaryAction,
         primaryLabelKey: 'settings.updateRetry',
         showReleaseLink: true,
-        statusKey: 'settings.updateStatusFailed',
+        statusKey: 'updater.failed',
         statusTone: 'error',
       };
+    }
     case 'unsupported':
       return {
         primaryAction: null,
