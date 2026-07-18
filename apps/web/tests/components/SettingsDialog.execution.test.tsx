@@ -801,7 +801,9 @@ describe('SettingsDialog execution settings BYOK interactions', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'OpenAI' }));
     selectGatewayPreset('DeepSeek — OpenAI');
 
-    expect(screen.getByRole('combobox', { name: 'Model' }).textContent).toContain('deepseek-chat');
+    expect(screen.getByRole('combobox', { name: 'Model' }).textContent).toContain(
+      'deepseek-v4-flash',
+    );
     expect((screen.getByLabelText('Base URL') as HTMLInputElement).value).toBe('https://api.deepseek.com');
   });
 
@@ -843,7 +845,9 @@ describe('SettingsDialog execution settings BYOK interactions', () => {
 
     fireEvent.click(within(providerPopover).getByRole('option', { name: 'DeepSeek — Anthropic' }));
 
-    expect(screen.getByRole('combobox', { name: 'Model' }).textContent).toContain('deepseek-chat');
+    expect(screen.getByRole('combobox', { name: 'Model' }).textContent).toContain(
+      'deepseek-v4-flash',
+    );
     expect((screen.getByLabelText('Base URL') as HTMLInputElement).value).toBe(
       'https://api.deepseek.com/anthropic',
     );
@@ -935,10 +939,12 @@ describe('SettingsDialog execution settings BYOK interactions', () => {
     await waitFor(() => {
       expect(screen.getByText(/Connected\. Replied in 28 ms/)).toBeTruthy();
     });
-    const testConnectionCalls = fetchMock.mock.calls.filter(
-      ([input]) => input.toString() === '/api/test/connection',
-    );
-    expect(testConnectionCalls).toHaveLength(1);
+    await waitFor(() => {
+      const testConnectionCalls = fetchMock.mock.calls.filter(
+        ([input]) => input.toString() === '/api/test/connection',
+      );
+      expect(testConnectionCalls).toHaveLength(1);
+    });
   });
 
   it('keeps protocol drafts isolated without leaking API keys between tabs', () => {
@@ -1253,6 +1259,104 @@ describe('SettingsDialog execution settings BYOK interactions', () => {
       expect.objectContaining({
         apiProtocol: 'openai',
         model: 'account-ready-model',
+      }),
+      {},
+    );
+  });
+
+  it('replaces a retired preset with the first provider preference available to the account', async () => {
+    const testedModels: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url === '/api/memory') {
+        return new Response(
+          JSON.stringify({ enabled: true, memories: [], extraction: null }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      expect(url).toBe('/api/test/connection');
+      const body = JSON.parse(String(init?.body)) as { model?: string };
+      testedModels.push(body.model ?? '');
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          kind: 'ok',
+          latencyMs: 7,
+          model: body.model,
+          sample: 'pong',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    fetchProviderModelsMock.mockResolvedValueOnce({
+      ok: true,
+      kind: 'success',
+      latencyMs: 12,
+      models: [
+        { id: 'account-first', label: 'Account First' },
+        { id: 'kimi-k2.6', label: 'Kimi K2.6' },
+      ],
+    });
+    const { onPersist } = renderSettingsDialog({
+      apiProtocol: 'openai',
+      apiKey: 'sk-moonshot',
+      baseUrl: 'https://api.moonshot.cn/v1',
+      model: 'kimi-k2-0711-preview',
+      apiProviderBaseUrl: 'https://api.moonshot.cn/v1',
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Moonshot' }));
+
+    expect(await screen.findByText(/✓ Loaded \d+ models(?: from your account)?\./)).toBeTruthy();
+    expect(screen.getByRole('combobox', { name: 'Model' }).textContent).toContain(
+      'Kimi K2.6 (kimi-k2.6) · From your account',
+    );
+    expect(screen.getByRole('combobox', { name: 'Model' }).textContent).not.toContain(
+      'account-first',
+    );
+    await waitForPersist(
+      onPersist,
+      expect.objectContaining({
+        apiProtocol: 'openai',
+        model: 'kimi-k2.6',
+      }),
+      {},
+    );
+    await waitFor(() => {
+      expect(testedModels).toEqual(['kimi-k2.6']);
+    });
+  });
+
+  it('does not treat the first upstream model as the default when no preference matches', async () => {
+    fetchProviderModelsMock.mockResolvedValueOnce({
+      ok: true,
+      kind: 'success',
+      latencyMs: 12,
+      models: [
+        { id: 'account-first', label: 'Account First' },
+        { id: 'account-second', label: 'Account Second' },
+      ],
+    });
+    const { onPersist } = renderSettingsDialog({
+      apiProtocol: 'openai',
+      apiKey: 'sk-openai',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-4o',
+      apiProviderBaseUrl: 'https://api.openai.com/v1',
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'OpenAI' }));
+
+    expect(await screen.findByText(/✓ Loaded \d+ models(?: from your account)?\./)).toBeTruthy();
+    expect(screen.getByRole('combobox', { name: 'Model' }).textContent).not.toContain(
+      'account-first',
+    );
+    await waitForPersist(
+      onPersist,
+      expect.objectContaining({
+        apiProtocol: 'openai',
+        model: '',
       }),
       {},
     );
@@ -1996,10 +2100,12 @@ describe('SettingsDialog execution settings BYOK interactions', () => {
       expect(apiKeyInput.value).toBe('sk-ant-test-provider');
     });
     expect(screen.getByText(en['settings.apiKeyCleaned'])).toBeTruthy();
-    const testConnectionCalls = fetchMock.mock.calls.filter(
-      ([input]) => input.toString() === '/api/test/connection',
-    );
-    expect(testConnectionCalls).toHaveLength(1);
+    await waitFor(() => {
+      const testConnectionCalls = fetchMock.mock.calls.filter(
+        ([input]) => input.toString() === '/api/test/connection',
+      );
+      expect(testConnectionCalls).toHaveLength(1);
+    });
   });
 
   it('lets users retry a failed BYOK connection test without editing the API key', async () => {
@@ -2373,6 +2479,40 @@ describe('SettingsDialog execution settings Local CLI interactions', () => {
 
     const modelPopover = screen.getByTestId('settings-agent-model-popover-codex');
     expect(optionNames(modelPopover)).toEqual(['gpt-4.1-mini', 'gpt-5.5', 'Custom (type below)…']);
+  });
+
+  it('keeps the Local CLI custom model input clearable when default is the fallback model', () => {
+    renderSettingsDialog(
+      { mode: 'daemon', agentId: 'codex' },
+      {
+        agents: [
+          {
+            ...availableAgents[0]!,
+            models: [{ id: 'default', label: 'Default' }],
+          },
+        ],
+      },
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: /Local CLI/i }));
+    fireEvent.click(screen.getByRole('combobox', {
+      name: en['settings.modelPicker'],
+    }));
+    const modelPopover = screen.getByTestId('settings-agent-model-popover-codex');
+    fireEvent.click(within(modelPopover).getByRole('option', {
+      name: en['settings.modelCustom'],
+    }));
+
+    const customModelInput = screen.getByLabelText(
+      en['settings.modelCustomLabel'],
+    ) as HTMLInputElement;
+    expect(customModelInput.value).toBe('');
+
+    fireEvent.change(customModelInput, { target: { value: 'default' } });
+    expect(customModelInput.value).toBe('default');
+
+    fireEvent.change(customModelInput, { target: { value: '' } });
+    expect(customModelInput.value).toBe('');
   });
 
   it('labels live CLI model metadata in the model picker', () => {
