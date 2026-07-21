@@ -23,6 +23,7 @@ export type AnalyticsEventName =
   | 'media_generation_result'
   // Packaged updater lifecycle
   | 'update_install_result'
+  | 'update_check_result'
   | 'update_apply_observed'
   // Packaged startup failure — emitted by the packaged MAIN process (not the
   // daemon) when daemon/web sidecars die before reporting status, i.e. the
