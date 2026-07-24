@@ -1780,6 +1780,28 @@ export function SettingsDialog({
     ReadonlySet<string>
   >(() => new Set());
 
+  // Manual updater/launcher cache clear — the disaster-recovery action for
+  // stuck update state. The desktop owns the capability; this handler only
+  // reports the outcome and refreshes the About updater model.
+  const handleClearUpdaterCache = useCallback(() => {
+    if (clearUpdaterCacheBusy) return;
+    setClearUpdaterCacheBusy(true);
+    void (async () => {
+      try {
+        const result = await clearUpdaterCache();
+        if (result.ok) {
+          setAboutUpdaterModel(result.model);
+          setAboutToast(t('settings.clearUpdaterCacheSuccess'));
+        } else {
+          setAboutToast(t('settings.clearUpdaterCacheFailed'));
+        }
+      } finally {
+        setClearUpdaterCacheBusy(false);
+        setClearUpdaterCacheStage('idle');
+      }
+    })();
+  }, [clearUpdaterCacheBusy, t]);
+
   // Precise inverse of App.handleCompleteOnboarding: flip
   // onboardingCompleted back to false, mirror it to localStorage and the
   // daemon through the same config-persist path, then route the user into
@@ -5776,6 +5798,41 @@ export function SettingsDialog({
                   </span>
                 </label>
               </div>
+              {aboutUpdaterModel.environment === 'desktop'
+                && aboutUpdaterModel.supported
+                && appVersionInfo?.packaged !== false ? (
+                <div className="settings-about-diagnostics">
+                  <div className="settings-about-diagnostics-text">
+                    <h4>{t('settings.clearUpdaterCacheTitle')}</h4>
+                    <p className="hint">{t('settings.clearUpdaterCacheHint')}</p>
+                  </div>
+                  {clearUpdaterCacheStage === 'confirm' ? (
+                    <>
+                      <Button
+                        disabled={clearUpdaterCacheBusy}
+                        onClick={() => setClearUpdaterCacheStage('idle')}
+                      >
+                        {t('common.cancel')}
+                      </Button>
+                      <Button
+                        data-testid="settings-clear-updater-cache-confirm"
+                        disabled={clearUpdaterCacheBusy || aboutUpdaterModel.busy}
+                        onClick={handleClearUpdaterCache}
+                      >
+                        {t('settings.clearUpdaterCacheConfirmButton')}
+                      </Button>
+                    </>
+                  ) : (
+                    <Button
+                      data-testid="settings-clear-updater-cache"
+                      disabled={clearUpdaterCacheBusy || aboutUpdaterModel.busy}
+                      onClick={() => setClearUpdaterCacheStage('confirm')}
+                    >
+                      {t('settings.clearUpdaterCacheButton')}
+                    </Button>
+                  )}
+                </div>
+              ) : null}
               <div className="settings-about-diagnostics">
                 <div className="settings-about-diagnostics-text">
                   <h4>{t('diagnostics.exportTitle')}</h4>
