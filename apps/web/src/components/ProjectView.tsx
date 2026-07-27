@@ -220,6 +220,7 @@ import { EntrySettingsMenu } from './EntrySettingsMenu';
 import { MessageCenter } from './MessageCenter';
 import { HandoffButton } from './HandoffButton';
 import { Icon } from './Icon';
+import { ProjectHeaderMenu } from './ProjectHeaderMenu';
 import { localizePluginTitle } from './plugins-home/localization';
 import { DesignSystemPicker } from './DesignSystemPicker';
 import { PluginDetailsModal } from './PluginDetailsModal';
@@ -281,6 +282,7 @@ import {
   buildFinalizeCredentialsMissingToast,
   buildFinalizeRequest,
 } from '../lib/resolve-finalize-request';
+import { subscribeInspirationBrowse } from '../runtime/inspiration-browse-intent';
 
 type BrandBrowserSnapshot =
   | { status: 'ready'; html: string; css: string; baseUrl: string }
@@ -311,6 +313,15 @@ type ProjectChatSendMeta = ChatSendMeta & {
    *  the home submit (with any soft warning answered there); skip re-gating
    *  so the user is never double-prompted for one task. */
   amrGatePrechecked?: boolean;
+  /** Per-send design-system override. The inline inspiration picker applies
+   *  its pick to the project (async React state), so the same send must carry
+   *  the id explicitly or this first run would still see the stale project
+   *  value. */
+  designSystemId?: string | null;
+  /** Additional inspiration systems beyond the applied primary (inspiration
+   *  picker multi-select) — forwarded to the daemon as the run's
+   *  `inspirationDesignSystemIds` prompt metadata. */
+  inspirationDesignSystemIds?: string[];
 };
 
 export function mergeSavedPreviewComment(current: PreviewComment[], saved: PreviewComment): PreviewComment[] {
@@ -1741,6 +1752,21 @@ export function ProjectView({
   // tab still focuses it.
   const [openRequest, setOpenRequest] = useState<{ name: string; nonce: number } | null>(null);
   const [browserOpenRequest, setBrowserOpenRequest] = useState<BrowserOpenRequest | null>(null);
+  // The inspiration picker's reference-site shortcuts (Dribbble, Mobbin, …)
+  // open through the workspace's built-in Browser: one tab per site, reused
+  // on repeat clicks, so the user can copy an image there and paste it back
+  // into the picker.
+  useEffect(
+    () =>
+      subscribeInspirationBrowse(({ siteId, url }) => {
+        setBrowserOpenRequest({
+          tabId: `inspiration-${siteId}`,
+          url,
+          nonce: Date.now(),
+        });
+      }),
+    [],
+  );
   // Like `openRequest`, but additionally asks the preview workspace to open the
   // file's Share/Export menu. Drives the "Share" next-step action: it reuses the
   // existing export/deploy surface rather than introducing a new share backend.
@@ -4296,6 +4322,8 @@ export function ProjectView({
               // null the same as an active retryable state and keep the row
               // eligible for future refresh/reattach. Only authoritative
               // terminal statuses seal completedReattachRunsRef.
+              let shouldRefreshConversationAfterCleanup = true;
+              let shouldRetryAfterControllerCleanup = false;
               if (genericDisconnect) {
                 const attempts = (genericDisconnectRetriesRef.current.get(runId) ?? 0) + 1;
                 if (attempts >= MAX_TRANSIENT_RETRIES) {
@@ -4312,15 +4340,18 @@ export function ProjectView({
                     cancelController,
                   );
                   const backoffTimer = scheduleProjectTimeout(() => {
-                    const currentBackoffUntil =
-                      genericDisconnectBackoffUntilRef.current.get(runId) ?? 0;
-                    if (currentBackoffUntil <= Date.now()) {
-                      genericDisconnectBackoffUntilRef.current.delete(runId);
-                    }
+                    genericDisconnectBackoffUntilRef.current.delete(runId);
+                    shouldRetryAfterControllerCleanup = true;
                     setRecoveryTick((t) => t + 1);
                   }, 3000);
                   const latestRunStatus = await fetchChatRunStatus(runId).catch(() => null);
                   if (!latestRunStatus || isActiveRunStatus(latestRunStatus.status)) {
+                    // If the backoff elapsed while this probe was still in
+                    // flight, its recovery tick already ran while the run was
+                    // still registered as reattaching. Re-run recovery after
+                    // controller cleanup so the retry is not stranded until an
+                    // unrelated state change.
+                    shouldRefreshConversationAfterCleanup = false;
                   } else if (latestRunStatus.status === 'succeeded') {
                     if (
                       shouldPublishRunFinishedEvent
@@ -4417,8 +4448,13 @@ export function ProjectView({
               reattachCancelControllersRef.current.delete(runId);
               clearCurrentRunStreamingMarker(reattachConversationId, controller, cancelController);
               if (!skipFinalPersistNow) persistNow({ telemetryFinalized: true });
+              if (shouldRetryAfterControllerCleanup && !shouldRefreshConversationAfterCleanup) {
+                setRecoveryTick((t) => t + 1);
+              }
               if (retryFullReplayAfterCleanup) setRecoveryTick((t) => t + 1);
-              scheduleConversationMessageRefresh(reattachConversationId);
+              if (shouldRefreshConversationAfterCleanup) {
+                scheduleConversationMessageRefresh(reattachConversationId);
+              }
             },
           },
           onRunStatus: (runStatus) => {
@@ -5698,11 +5734,7 @@ export function ProjectView({
                 genericDisconnectRetriesRef.current.set(runIdForGenericDisconnect, attempts);
                 genericDisconnectBackoffUntilRef.current.set(runIdForGenericDisconnect, backoffUntil);
                 const backoffTimer = scheduleProjectTimeout(() => {
-                  const currentBackoffUntil =
-                    genericDisconnectBackoffUntilRef.current.get(runIdForGenericDisconnect) ?? 0;
-                  if (currentBackoffUntil <= Date.now()) {
-                    genericDisconnectBackoffUntilRef.current.delete(runIdForGenericDisconnect);
-                  }
+                  genericDisconnectBackoffUntilRef.current.delete(runIdForGenericDisconnect);
                   setRecoveryTick((t) => t + 1);
                 }, 3000);
                 const latestRunStatus = await fetchChatRunStatus(runIdForGenericDisconnect).catch(() => null);
@@ -5904,7 +5936,10 @@ export function ProjectView({
           skillId: project.skillId ?? null,
           skillIds: Array.isArray(meta?.skillIds) ? meta.skillIds : [],
           context: runContext,
-          designSystemId: projectDesignSystemId ?? null,
+          designSystemId: meta?.designSystemId ?? projectDesignSystemId ?? null,
+          inspirationDesignSystemIds: Array.isArray(meta?.inspirationDesignSystemIds)
+            ? meta.inspirationDesignSystemIds
+            : [],
           attachments: runAttachments.map((a) => a.path),
           commentAttachments: runCommentAttachments,
           sessionMode: runSessionMode,
@@ -6065,7 +6100,10 @@ export function ProjectView({
           skillId: project.skillId ?? null,
           skillIds: Array.isArray(meta?.skillIds) ? meta.skillIds : [],
           context: runContext,
-          designSystemId: projectDesignSystemId ?? null,
+          designSystemId: meta?.designSystemId ?? projectDesignSystemId ?? null,
+          inspirationDesignSystemIds: Array.isArray(meta?.inspirationDesignSystemIds)
+            ? meta.inspirationDesignSystemIds
+            : [],
           attachments: runAttachments.map((a) => a.path),
           commentAttachments: runCommentAttachments,
           sessionMode: runSessionMode,
@@ -8572,9 +8610,27 @@ export function ProjectView({
               questionFormSubmitDisabled={currentConversationActionDisabled}
               onSubmitQuestionForm={(text, attachments = [], context) => {
                 if (currentConversationActionDisabled) return false;
+                const { applyDesignSystemId, inspirationDesignSystemIds, ...runContext } =
+                  context ?? {};
+                // The inspiration picker's design-system pick goes through the
+                // real project apply flow (same as the header picker) so it
+                // persists for later turns; the send below carries the id
+                // explicitly because the project state update is async.
+                if (applyDesignSystemId) {
+                  handleChangeDesignSystemId(applyDesignSystemId);
+                }
+                const hasRunContext = Object.keys(runContext).length > 0;
                 return handleSend(text, attachments, [], {
                   entryFrom: 'question_answer',
-                  ...(context ? { context } : {}),
+                  ...(applyDesignSystemId ? { designSystemId: applyDesignSystemId } : {}),
+                  ...(Array.isArray(inspirationDesignSystemIds) &&
+                  inspirationDesignSystemIds.length > 0
+                    ? { inspirationDesignSystemIds }
+                    : {}),
+                  ...(Array.isArray(runContext.skillIds) && runContext.skillIds.length > 0
+                    ? { skillIds: runContext.skillIds }
+                    : {}),
+                  ...(hasRunContext ? { context: runContext } : {}),
                 });
               }}
               onContinueRemainingTasks={handleContinueRemainingTasks}
@@ -8694,6 +8750,28 @@ export function ProjectView({
                   {projectTypeLabel ? (
                     <span className="meta" data-testid="project-meta">{projectTypeLabel}</span>
                   ) : null}
+                  <ProjectHeaderMenu
+                    projectName={project.name}
+                    onRename={handleProjectRename}
+                    onDuplicate={
+                      // The duplicate endpoint rejects design-system-like
+                      // projects (400 PROJECT_ALREADY_DESIGN_SYSTEM), so hide
+                      // the entry instead of offering an action that always
+                      // errors. `projectIsDesignSystemProject` mirrors the
+                      // daemon's `isDesignSystemLikeProject` guard exactly.
+                      onDuplicateProject && !projectIsDesignSystemProject
+                        ? handleDuplicateProject
+                        : undefined
+                    }
+                    duplicateBusy={projectDuplicateStarting}
+                    onDelete={
+                      onDeleteProject
+                        ? () => {
+                            void onDeleteProject(project.id);
+                          }
+                        : undefined
+                    }
+                  />
                 </span>
               )}
               designSystemPicker={(
