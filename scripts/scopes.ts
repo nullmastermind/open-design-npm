@@ -3,6 +3,7 @@ import { appendFileSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { uiP0CiMatrix, visualCiMatrix } from "../e2e/lib/playwright/suites.ts";
+import type { UiP0CiMatrixEntry } from "../e2e/lib/playwright/suites.ts";
 
 // ---------------------------------------------------------------------------
 // Scope model
@@ -47,6 +48,35 @@ export type Confidence = "medium" | "certain";
 
 export type TrustThreshold = "medium" | "certain";
 
+export const DAEMON_RUNTIME_DEFINITION_PREFIXES = [
+  "apps/daemon/src/runtimes/defs/",
+] as const;
+
+export const DAEMON_RUNTIME_DEFINITION_EXACT = [
+  "apps/daemon/src/runtimes/capabilities.ts",
+  "apps/daemon/src/runtimes/local-profiles.ts",
+  "apps/daemon/src/runtimes/metadata.ts",
+  "apps/daemon/src/runtimes/registry.ts",
+  "apps/daemon/tests/runtimes/agent-args.test.ts",
+  "apps/daemon/tests/runtimes/antigravity-model-lock.test.ts",
+  "apps/daemon/tests/runtimes/atomcode.test.ts",
+  "apps/daemon/tests/runtimes/byok-opencode.test.ts",
+  "apps/daemon/tests/runtimes/chat-run-inactivity-timeout.test.ts",
+  "apps/daemon/tests/runtimes/claude-resume-args.test.ts",
+  "apps/daemon/tests/runtimes/codebuddy.test.ts",
+  "apps/daemon/tests/runtimes/codex-resume-args.test.ts",
+  "apps/daemon/tests/runtimes/detection-resilience.test.ts",
+  "apps/daemon/tests/runtimes/opencode-resume-args.test.ts",
+  "apps/daemon/tests/runtimes/registry-and-args.test.ts",
+  "apps/daemon/tests/runtimes/trae-cli.test.ts",
+] as const;
+
+const DAEMON_RUNTIME_DEFINITION_MATRIX_NAMES = [
+  "entry-settings",
+  "project-workspace",
+  "project-runtime",
+] as const;
+
 export type RuleMatch = {
   prefixes?: readonly string[];
   exact?: readonly string[];
@@ -74,6 +104,7 @@ type ScopePlan = ScopeOutputs & {
   run_playwright_critical: boolean;
   run_playwright_visual: boolean;
   run_preflight: boolean;
+  run_preflight_typecheck: boolean;
   run_ui_p0: boolean;
   run_web_workspace_tests: boolean;
   run_windows_tools_pack_payload_tests: boolean;
@@ -100,10 +131,10 @@ type GitHubEvent = {
 // ---------------------------------------------------------------------------
 
 // Certain-tier exempt core: surfaces whose "cannot affect gate validation"
-// invariant is definitional and enforced by the named guard check. Floor lanes
-// (preflight and workspace unit tests, both unconditionally armed) still run
-// for these files, so floor-owned checks that read them — e.g. product
-// neutrality over docs/ — keep validating them on every plan.
+// invariant is definitional and enforced by the named guard check. The
+// preflight policy floor still runs for these files, so floor-owned checks
+// that read them — e.g. product neutrality over docs/ — keep validating them
+// on every plan.
 export const CERTAIN_EXEMPT_PREFIXES = [
   ".vscode/",
   ".idea/",
@@ -119,6 +150,52 @@ export const CERTAIN_EXEMPT_EXACT = ["LICENSE", ".github/CODEOWNERS"] as const;
 const CERTAIN_EXEMPT_SURFACE: RuleMatch = {
   prefixes: CERTAIN_EXEMPT_PREFIXES,
   exact: CERTAIN_EXEMPT_EXACT,
+};
+
+export const CERTAIN_PACKAGED_LEAF_PREFIXES = [
+  "apps/desktop/src/",
+  "apps/desktop/tests/",
+  "apps/packaged/src/",
+  "apps/packaged/tests/",
+  "tools/pack/src/",
+  "tools/pack/tests/",
+  "tools/pack/resources/",
+] as const;
+
+const CERTAIN_PACKAGED_LEAF_SURFACE: RuleMatch = {
+  prefixes: CERTAIN_PACKAGED_LEAF_PREFIXES,
+};
+
+export const CERTAIN_DAEMON_CORE_PREFIXES = [
+  "apps/daemon/src/",
+  "apps/daemon/tests/",
+] as const;
+
+export const CERTAIN_DAEMON_CORE_EXCLUDED_PREFIXES = [
+  "apps/daemon/src/sidecar/",
+  ...DAEMON_RUNTIME_DEFINITION_PREFIXES,
+] as const;
+
+export const CERTAIN_DAEMON_CORE_EXCLUDED_EXACT = DAEMON_RUNTIME_DEFINITION_EXACT;
+
+const CERTAIN_DAEMON_CORE_EXCLUDED_SURFACE: RuleMatch = {
+  prefixes: CERTAIN_DAEMON_CORE_EXCLUDED_PREFIXES,
+  exact: CERTAIN_DAEMON_CORE_EXCLUDED_EXACT,
+};
+
+const CERTAIN_DAEMON_CORE_SURFACE: RuleMatch = {
+  prefixes: CERTAIN_DAEMON_CORE_PREFIXES,
+  excludeWhen: CERTAIN_DAEMON_CORE_EXCLUDED_SURFACE,
+};
+
+const CERTAIN_SURFACE: RuleMatch = {
+  prefixes: [
+    ...CERTAIN_EXEMPT_PREFIXES,
+    ...CERTAIN_PACKAGED_LEAF_PREFIXES,
+    ...CERTAIN_DAEMON_CORE_PREFIXES,
+  ],
+  exact: CERTAIN_EXEMPT_EXACT,
+  excludeWhen: CERTAIN_DAEMON_CORE_EXCLUDED_SURFACE,
 };
 
 // Medium-tier exempt residue. The global markdown regex stays medium on
@@ -145,11 +222,16 @@ const MEDIUM_EXEMPT_EXACT = [
 
 const EXEMPT_REGEXES = [/\.(?:md|mdx|txt)$/] as const;
 
-// Union of both exempt tiers; this is what the fail-closed fallbacks exclude.
-const EXEMPT_SURFACE: RuleMatch = {
-  prefixes: [...CERTAIN_EXEMPT_PREFIXES, ...MEDIUM_EXEMPT_PREFIXES],
+const WORKSPACE_FALLBACK_EXCLUDED_SURFACE: RuleMatch = {
+  prefixes: [
+    ...CERTAIN_EXEMPT_PREFIXES,
+    ...MEDIUM_EXEMPT_PREFIXES,
+    ...CERTAIN_PACKAGED_LEAF_PREFIXES,
+    ...CERTAIN_DAEMON_CORE_PREFIXES,
+  ],
   exact: [...CERTAIN_EXEMPT_EXACT, ...MEDIUM_EXEMPT_EXACT],
   regexes: EXEMPT_REGEXES,
+  excludeWhen: CERTAIN_DAEMON_CORE_EXCLUDED_SURFACE,
 };
 
 export const scopeRules: readonly ScopeRule[] = [
@@ -169,10 +251,22 @@ export const scopeRules: readonly ScopeRule[] = [
       prefixes: MEDIUM_EXEMPT_PREFIXES,
       exact: MEDIUM_EXEMPT_EXACT,
       regexes: EXEMPT_REGEXES,
-      excludeWhen: CERTAIN_EXEMPT_SURFACE,
+      excludeWhen: CERTAIN_SURFACE,
     },
     effects: [],
     confidence: "medium",
+  },
+  {
+    id: "certain-daemon-core",
+    match: CERTAIN_DAEMON_CORE_SURFACE,
+    effects: [
+      "daemon_tests_required",
+      "ui_critical_validation_required",
+      "ui_p0_validation_required",
+      "workspace_validation_required",
+    ],
+    confidence: "certain",
+    guard: "daemon core boundary",
   },
   {
     id: "daemon-sources",
@@ -185,6 +279,7 @@ export const scopeRules: readonly ScopeRule[] = [
         "packages/sidecar/",
         "packages/sidecar-proto/",
       ],
+      excludeWhen: CERTAIN_DAEMON_CORE_SURFACE,
     },
     effects: ["daemon_tests_required"],
     confidence: "medium",
@@ -231,6 +326,13 @@ export const scopeRules: readonly ScopeRule[] = [
     confidence: "medium",
   },
   {
+    id: "certain-packaged-leaf-sources",
+    match: CERTAIN_PACKAGED_LEAF_SURFACE,
+    effects: ["tools_dev_tests_required", "tools_pack_tests_required", "workspace_validation_required"],
+    confidence: "certain",
+    guard: "packaged leaf boundary",
+  },
+  {
     id: "tools-pack-sources",
     match: {
       prefixes: [
@@ -244,6 +346,7 @@ export const scopeRules: readonly ScopeRule[] = [
         "packages/sidecar/",
         "packages/sidecar-proto/",
       ],
+      excludeWhen: CERTAIN_PACKAGED_LEAF_SURFACE,
     },
     effects: ["tools_pack_tests_required"],
     confidence: "medium",
@@ -286,6 +389,7 @@ export const scopeRules: readonly ScopeRule[] = [
         ".github/workflows/ci.yml",
         ".github/workflows/ui-extended-main.yml",
       ],
+      excludeWhen: CERTAIN_DAEMON_CORE_SURFACE,
     },
     effects: ["ui_p0_validation_required"],
     confidence: "medium",
@@ -313,7 +417,7 @@ export const scopeRules: readonly ScopeRule[] = [
   },
   {
     id: "workspace-fallback",
-    match: { excludeWhen: EXEMPT_SURFACE },
+    match: { excludeWhen: WORKSPACE_FALLBACK_EXCLUDED_SURFACE },
     effects: ["workspace_validation_required"],
     confidence: "medium",
   },
@@ -330,12 +434,14 @@ export const scopeRules: readonly ScopeRule[] = [
         prefixes: [
           ...CERTAIN_EXEMPT_PREFIXES,
           ...MEDIUM_EXEMPT_PREFIXES,
+          ...CERTAIN_DAEMON_CORE_PREFIXES,
           "apps/desktop/",
           "apps/packaged/",
           "tools/pack/",
         ],
         exact: [...CERTAIN_EXEMPT_EXACT, ...MEDIUM_EXEMPT_EXACT],
         regexes: EXEMPT_REGEXES,
+        excludeWhen: CERTAIN_DAEMON_CORE_EXCLUDED_SURFACE,
       },
     },
     effects: ["ui_critical_validation_required"],
@@ -457,6 +563,11 @@ function createRunPlan(
   fullLanes: boolean = ciMode === "full",
 ): Omit<ScopePlan, keyof ScopeOutputs | "ui_p0_matrix" | "visual_matrix"> {
   const isFull = fullLanes;
+  const hasValidationScope = SCOPE_EFFECTS.some((effect) => outputs[effect]);
+  // Preserve every PR/manual-hot signal. Only a merge-queue plan whose
+  // certain-tier rules claim zero validation effects may skip broad workspace
+  // work; preflight itself stays armed as the always-run policy floor.
+  const runBroadWorkspaceValidation = isFull || ciMode === "hot" || hasValidationScope;
   const runUiP0 = isFull || outputs.ui_p0_validation_required;
 
   return {
@@ -465,10 +576,11 @@ function createRunPlan(
     run_playwright_critical: outputs.ui_critical_validation_required && !runUiP0,
     run_playwright_visual: isFull || outputs.visual_validation_required,
     run_preflight: true,
+    run_preflight_typecheck: runBroadWorkspaceValidation,
     run_ui_p0: runUiP0,
     run_web_workspace_tests: isFull || outputs.web_tests_required,
     run_windows_tools_pack_payload_tests: isFull || outputs.tools_pack_tests_required,
-    run_workspace_unit_tests: true,
+    run_workspace_unit_tests: runBroadWorkspaceValidation,
   };
 }
 
@@ -485,6 +597,63 @@ function buildScopePlan(outputs: ScopeOutputs, ciMode: CiMode, fullLanes?: boole
 // Decision trace
 // ---------------------------------------------------------------------------
 
+export type UiP0ShadowDecision = {
+  mode: "candidate" | "full-fallback";
+  capability: "daemon-runtime-definition" | null;
+  matrix: readonly UiP0CiMatrixEntry[];
+  reason: "capability-match" | "empty-change-set" | "files-unresolved" | "outside-capability";
+  outsideCapabilityFiles: readonly string[];
+};
+
+function isDaemonRuntimeDefinitionFile(file: string): boolean {
+  return (
+    DAEMON_RUNTIME_DEFINITION_PREFIXES.some((prefix) => file.startsWith(prefix)) ||
+    DAEMON_RUNTIME_DEFINITION_EXACT.includes(file as (typeof DAEMON_RUNTIME_DEFINITION_EXACT)[number])
+  );
+}
+
+export function evaluateUiP0Shadow(
+  files: readonly string[],
+  filesResolved: boolean = true,
+): UiP0ShadowDecision {
+  if (!filesResolved) {
+    return {
+      mode: "full-fallback",
+      capability: null,
+      matrix: uiP0CiMatrix,
+      reason: "files-unresolved",
+      outsideCapabilityFiles: [],
+    };
+  }
+  if (files.length === 0) {
+    return {
+      mode: "full-fallback",
+      capability: null,
+      matrix: uiP0CiMatrix,
+      reason: "empty-change-set",
+      outsideCapabilityFiles: [],
+    };
+  }
+  const outsideCapabilityFiles = files.filter((file) => !isDaemonRuntimeDefinitionFile(file));
+  if (outsideCapabilityFiles.length > 0) {
+    return {
+      mode: "full-fallback",
+      capability: null,
+      matrix: uiP0CiMatrix,
+      reason: "outside-capability",
+      outsideCapabilityFiles,
+    };
+  }
+  const candidateNames = new Set<string>(DAEMON_RUNTIME_DEFINITION_MATRIX_NAMES);
+  return {
+    mode: "candidate",
+    capability: "daemon-runtime-definition",
+    matrix: uiP0CiMatrix.filter((entry) => candidateNames.has(entry.name)),
+    reason: "capability-match",
+    outsideCapabilityFiles: [],
+  };
+}
+
 export type ScopeTrace = {
   source: string;
   threshold: TrustThreshold | "none";
@@ -492,6 +661,7 @@ export type ScopeTrace = {
   fileCount: number;
   ruleHits: Record<string, number>;
   escalations: readonly { file: string; reason: string }[];
+  uiP0Shadow: UiP0ShadowDecision;
   plans: {
     applied: ScopePlan;
     /**
@@ -506,6 +676,7 @@ export type ScopeTrace = {
 
 function buildTrace(
   source: string,
+  files: readonly string[],
   threshold: TrustThreshold,
   evaluation: ScopeEvaluation,
   appliedPlan: ScopePlan,
@@ -526,6 +697,7 @@ function buildTrace(
     escalations: evaluation.decisions
       .filter((decision) => decision.escalated)
       .map((decision) => ({ file: decision.file, reason: decision.reason ?? "unknown" })),
+    uiP0Shadow: evaluateUiP0Shadow(files),
     plans: { applied: appliedPlan, ifTrustAll: ifTrustAllPlan },
   };
 }
@@ -538,6 +710,7 @@ function buildEverythingTrace(source: string, appliedPlan: ScopePlan): ScopeTrac
     fileCount: 0,
     ruleHits: {},
     escalations: [],
+    uiP0Shadow: evaluateUiP0Shadow([], false),
     plans: { applied: appliedPlan },
   };
 }
@@ -571,7 +744,7 @@ function createEnvScopePlan(): PlanWithTrace {
     // The merge queue evaluates the whole queued group's union diff at the
     // "certain" threshold. Files matching only certain-tier rules contribute
     // their claimed radius (for the certain-exempt core: none — a pure-docs
-    // group drops to the unconditional floor lanes); every other file
+    // group drops to the preflight policy floor); every other file
     // escalates and keeps the plan full. The trace's ifTrustAll shadow column
     // is the evidence stream for future promotions. Resolution anomalies fail
     // open to the full plan: queue throughput must never depend on this
@@ -619,7 +792,7 @@ function evaluateChangedFilesPlan(
   const plan = buildScopePlan(evaluation.outputs, options.ciMode, fullLanes);
   const trustAll = evaluateScopeOutputs(files, "medium", options.evaluate);
   const trustAllPlan = buildScopePlan(trustAll.outputs, options.ciMode, fullLanes);
-  return { plan, trace: buildTrace(source, options.threshold, evaluation, plan, trustAllPlan) };
+  return { plan, trace: buildTrace(source, files, options.threshold, evaluation, plan, trustAllPlan) };
 }
 
 function resolveManualCiMode(): CiMode {
@@ -724,6 +897,7 @@ function emitTraceStepSummary(trace: ScopeTrace): void {
     "",
     `- source: \`${trace.source}\`, trust threshold: \`${trace.threshold}\``,
     `- files: ${trace.filesResolved ? trace.fileCount : "not resolved"}, escalated: ${trace.escalations.length}`,
+    `- UI P0 shadow: \`${trace.uiP0Shadow.mode}\` (${trace.uiP0Shadow.matrix.map((entry) => entry.name).join(", ")})`,
   ];
   const hits = Object.entries(trace.ruleHits);
   if (hits.length > 0) {
