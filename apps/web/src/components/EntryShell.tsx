@@ -704,8 +704,8 @@ export function EntryShell({
   // `projectKind` on the payload so the created project records the
   // chosen surface (image / video / audio, etc.). Free-form Home
   // submits now arrive with the hidden od-default router plugin and
-  // projectKind='other', so the agent asks for the exact task type
-  // before continuing.
+  // projectKind='other', so the agent infers the task type and asks only
+  // when the brief cannot be routed reliably.
   async function handlePluginLoopSubmit(payload: PluginLoopSubmit) {
     // Open Design Cloud pre-run balance gate: hard blocks (empty wallet or
     // signed out) and the soft low-balance reminder both fire BEFORE the
@@ -1413,7 +1413,10 @@ function OnboardingView({
   const selectedProvider = KNOWN_PROVIDERS.find(
     (provider) =>
       provider.protocol === apiProtocol &&
-      provider.baseUrl === (config.apiProviderBaseUrl ?? config.baseUrl),
+      (
+        provider.baseUrl === (config.apiProviderBaseUrl ?? config.baseUrl) ||
+        (apiProtocol === 'azure' && provider.baseUrl === '' && Boolean(config.baseUrl?.trim()))
+      ),
   ) ?? null;
   const availableCliAgents = agents.filter((agent) => agent.available && agent.id !== 'amr');
   const visibleAgents = availableCliAgents.filter((agent) => visibleAgentIds.includes(agent.id));
@@ -1814,9 +1817,14 @@ function OnboardingView({
     }
   }
 
+  const protocolProviders = KNOWN_PROVIDERS.filter((provider) => provider.protocol === apiProtocol);
+  const hasProtocolOwnedEmptyProvider =
+    apiProtocol === 'azure' && protocolProviders.some((provider) => provider.baseUrl === '');
   const byokProviderOptions = [
-    { value: '', label: t('settings.customProvider') },
-    ...KNOWN_PROVIDERS.filter((provider) => provider.protocol === apiProtocol).map((provider) => ({
+    ...(hasProtocolOwnedEmptyProvider
+      ? []
+      : [{ value: '', label: t('settings.customProvider') }]),
+    ...protocolProviders.map((provider) => ({
       value: provider.baseUrl,
       label: provider.label,
     })),
@@ -2898,7 +2906,10 @@ function OnboardingView({
                       updateApiConfig({ model });
                     }}
                     onBaseUrlChange={(baseUrl) =>
-                      updateApiConfig({ baseUrl, apiProviderBaseUrl: null })
+                      updateApiConfig({
+                        baseUrl,
+                        apiProviderBaseUrl: apiProtocol === 'azure' ? '' : null,
+                      })
                     }
                     modelOptions={byokModelOptions}
                     testState={visibleProviderTestState}
@@ -3480,6 +3491,7 @@ function OnboardingByokSetupPanel({
   const t = useT();
   const running = testState.status === 'running';
   const fetchingModels = modelsState.status === 'running';
+  const useDeploymentInput = apiProtocol === 'azure';
   return (
     <div className="onboarding-view__setup-panel">
       <div className="onboarding-view__setup-head">
@@ -3532,6 +3544,7 @@ function OnboardingByokSetupPanel({
         value={selectedProvider?.baseUrl ?? ''}
         options={providerOptions}
         onChange={onProviderChange}
+        allowEmptyValue={apiProtocol === 'azure'}
         searchable
         searchPlaceholder={t('settings.quickFillProvider')}
       />
@@ -3560,7 +3573,7 @@ function OnboardingByokSetupPanel({
             onChange={(event) => onBaseUrlChange(event.target.value)}
           />
         </label>
-        {modelOptions.length > 0 ? (
+        {modelOptions.length > 0 && !useDeploymentInput ? (
           <OnboardingDropdown
             label={t('settings.model')}
             placeholder={defaultKnownProviderModel(selectedProvider) || 'claude-sonnet-4-5'}
@@ -3573,11 +3586,19 @@ function OnboardingByokSetupPanel({
           />
         ) : (
           <label className="onboarding-view__inline-field">
-            <span>{t('settings.model')}</span>
+            <span>
+              {useDeploymentInput
+                ? t('settings.azureDeploymentModel')
+                : t('settings.model')}
+            </span>
             <input
               type="text"
               value={model}
-              placeholder={defaultKnownProviderModel(selectedProvider) || 'claude-sonnet-4-5'}
+              placeholder={
+                useDeploymentInput
+                  ? t('settings.azureDeploymentModel')
+                  : defaultKnownProviderModel(selectedProvider) || 'claude-sonnet-4-5'
+              }
               onChange={(event) => onModelChange(event.target.value.trim())}
             />
           </label>
@@ -3862,6 +3883,7 @@ type OnboardingDropdownBaseProps = {
   searchable?: boolean;
   searchPlaceholder?: string;
   sourceTone?: string;
+  allowEmptyValue?: boolean;
 };
 
 type OnboardingDropdownProps =
@@ -3888,6 +3910,7 @@ export function OnboardingDropdown(props: OnboardingDropdownProps) {
     searchable = false,
     searchPlaceholder,
     sourceTone,
+    allowEmptyValue = false,
   } = props;
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -3895,7 +3918,11 @@ export function OnboardingDropdown(props: OnboardingDropdownProps) {
   const [menuMaxHeight, setMenuMaxHeight] = useState(240);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const dropdownIdRef = useRef(`onboarding-dropdown-${Math.random().toString(36).slice(2)}`);
-  const selectedValues = Array.isArray(value) ? value : value ? [value] : [];
+  const selectedValues = Array.isArray(value)
+    ? value
+    : value || allowEmptyValue
+      ? [value]
+      : [];
   const selectedOptions = options.filter((option) => selectedValues.includes(option.value));
   const selectedOption = selectedOptions[0];
   const hasValue = selectedOptions.length > 0;
