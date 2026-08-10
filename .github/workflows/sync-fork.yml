@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  # Needed to dispatch publish-npm.yml at the end of a successful sync.
+  actions: write
 
 jobs:
   sync:
@@ -22,6 +24,16 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # Needed by the "Validate merge result" step below, which parse-checks
+      # the merge before it is allowed to reach main.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '10.33.2'
 
       - name: Add upstream and fetch
         run: |
@@ -73,6 +85,34 @@ jobs:
             git commit --amend --no-edit
           fi
 
+      - name: Validate merge result
+        # `-X ours` resolves conflicting hunks silently and exits 0, so a merge
+        # can splice our deletions into upstream's rewritten code and produce
+        # source that no longer parses — with no conflict markers and no error.
+        # That is how the 2026-08-10 sync landed three unparseable files on
+        # main, which then broke the publish build. Gate the push on it.
+        #
+        # Deliberately parse-only, not `pnpm typecheck`: this fork removes
+        # modules that upstream still references, so its tree is not
+        # guaranteed typecheck-clean even for a good merge, and gating on
+        # typecheck could block every sync. See the script's header comment.
+        if: steps.check.outputs.has_updates == 'true'
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile
+          node --experimental-strip-types .github/scripts/check-merge-parse.ts
+
       - name: Push to origin
         if: steps.check.outputs.has_updates == 'true'
         run: git push origin main
+
+      - name: Trigger npm build and publish
+        # publish-npm.yml also listens on `push: branches: [main]`, but a push
+        # made with GITHUB_TOKEN never triggers other workflow runs (GitHub's
+        # anti-recursion rule), so the sync above would otherwise never lead
+        # to a publish. workflow_dispatch is exempt from that rule, so we
+        # dispatch it explicitly once the sync has landed on main.
+        if: steps.check.outputs.has_updates == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run publish-npm.yml --ref main
