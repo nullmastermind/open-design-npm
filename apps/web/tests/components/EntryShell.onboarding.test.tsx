@@ -11,6 +11,7 @@ import {
   AMR_LOGIN_TIMEOUT_MS,
 } from '../../src/components/amrLoginPolling';
 import { I18nProvider } from '../../src/i18n';
+import { fetchProjectFiles } from '../../src/providers/registry';
 import type { AgentInfo, AppConfig } from '../../src/types';
 import { setHomeHeroPrompt } from '../helpers/home-hero-lexical';
 
@@ -110,7 +111,6 @@ function renderOnboarding(
     onApiModelChange: vi.fn(),
     onConfigPersist: vi.fn(),
     onRefreshAgents: vi.fn(() => [amrAgent(), cliAgent()]),
-    onThemeChange: vi.fn(),
     onCreateProject: vi.fn(),
     onCreatePluginShareProject: vi.fn(),
     onImportClaudeDesign: vi.fn(),
@@ -120,19 +120,6 @@ function renderOnboarding(
     onRenameProject: vi.fn(),
     onChangeDefaultDesignSystem: vi.fn(),
     onPersistComposioKey: vi.fn(),
-    onPersistByokCredential: vi.fn(async (input) => ({
-      id: input.id ?? 'byok-onboarding-test',
-      label: input.label,
-      protocol: input.protocol,
-      baseUrl: input.baseUrl,
-      model: input.model,
-      apiVersion: input.apiVersion,
-      requiresApiKey: input.requiresApiKey ?? true,
-      configured: true,
-      keyTail: input.apiKey?.slice(-4),
-      createdAt: 1,
-      updatedAt: 1,
-    })),
     onOpenSettings: vi.fn(),
     onCompleteOnboarding: vi.fn(),
     ...overrides,
@@ -179,7 +166,6 @@ function renderHome(
     config: baseConfig({
       agentId: 'claude-code',
       agentModels: { 'claude-code': { model: 'sonnet' } },
-      theme: 'system',
     }),
     agents: [cliAgent()],
     daemonLive: true,
@@ -190,7 +176,6 @@ function renderHome(
     onApiModelChange: vi.fn(),
     onConfigPersist: vi.fn(),
     onRefreshAgents: vi.fn(() => [cliAgent()]),
-    onThemeChange: vi.fn(),
     onCreateProject: vi.fn(),
     onCreatePluginShareProject: vi.fn(),
     onImportClaudeDesign: vi.fn(),
@@ -273,7 +258,7 @@ async function clickSignedInCloudContinue() {
   const continueButton = await screen.findByRole('button', { name: /Continue \(signed in\)/i });
   fireEvent.click(continueButton);
   await waitFor(() => {
-    expect(screen.getByRole('heading', { name: 'About you' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Choose your model source' })).toBeTruthy();
   });
 }
 
@@ -287,10 +272,18 @@ async function findCloudSignInButton() {
   return screen.findByRole('button', { name: /Sign in to Open Design/i });
 }
 
-function openLocalRuntimeSetup() {
-  expect(screen.getByRole('heading', { name: 'Sign in to Open Design' })).toBeTruthy();
-  fireEvent.click(screen.getByRole('button', { name: /Local coding agent/i }));
-  expect(screen.getByText('Local CLI')).toBeTruthy();
+async function openLocalRuntimeSetup() {
+  await clickSignedInCloudContinue();
+  fireEvent.click(screen.getByRole('radio', { name: /Local Agent/i }));
+  fireEvent.click(screen.getByRole('button', { name: /^Continue$/i }));
+  expect(await screen.findByText('Local CLI')).toBeTruthy();
+}
+
+async function openByokRuntimeSetup() {
+  await clickSignedInCloudContinue();
+  fireEvent.click(screen.getByRole('radio', { name: /Bring Your Own Key/i }));
+  fireEvent.click(screen.getByRole('button', { name: /^Continue$/i }));
+  expect(await screen.findByRole('heading', { name: 'Bring Your Own Key' })).toBeTruthy();
 }
 
 afterEach(() => {
@@ -323,15 +316,23 @@ describe('EntryShell settings menu', () => {
     fireEvent.click(screen.getByTestId('entry-settings-open-details'));
 
     expect(props.onOpenSettings).toHaveBeenCalledWith();
+    expect(screen.getAllByTestId('entry-settings-button')).toHaveLength(1);
   });
 });
 
 describe('EntryShell design systems view', () => {
-  it('refreshes the design-system catalog when the view is active', async () => {
+  it('leaves workspace-scoped design-system activation to the mounted tab', async () => {
     const onDesignSystemsRefresh = vi.fn();
     renderHome({ onDesignSystemsRefresh }, '/design-systems');
 
-    await waitFor(() => expect(onDesignSystemsRefresh).toHaveBeenCalledTimes(1));
+    expect(await screen.findByTestId('entry-view-design-systems')).toHaveAttribute(
+      'data-active',
+      'true',
+    );
+    // DesignSystemsTab owns its Team SSE activation and fallback snapshot.
+    // Calling the App-level catalog refresh here as well creates a duplicate,
+    // differently-scoped request every time the route becomes active.
+    expect(onDesignSystemsRefresh).not.toHaveBeenCalled();
   });
 });
 
@@ -349,16 +350,23 @@ describe('EntryShell route scroll isolation', () => {
     return scrollContainer;
   }
 
-  it('resets the shared scroll offset when navigating from Home to Projects', async () => {
+  // #5517 reshaped the rail: the flat `entry-nav-projects` button is gone, and
+  // its Drafts / All-projects replacements only mount under a workspace
+  // context this render has none of. Design systems is the nearest rail
+  // destination that survives in every state, and the reset it exercises is the
+  // same shared `.entry-main--scroll` element, so the spec's subject is intact.
+  it('resets the shared scroll offset when navigating away from Home', async () => {
     window.localStorage.setItem('od.entry.railOpen', 'true');
     renderHome();
 
     const scrollContainer = entryScrollContainer();
     scrollContainer.scrollTop = 280;
-    fireEvent.click(screen.getByTestId('entry-nav-projects'));
+    fireEvent.click(screen.getByTestId('entry-nav-design-systems'));
 
     await waitFor(() => {
-      expect(screen.getByTestId('entry-view-projects').getAttribute('data-active')).toBe('true');
+      expect(
+        screen.getByTestId('entry-view-design-systems').getAttribute('data-active'),
+      ).toBe('true');
     });
     expect(scrollContainer.scrollTop).toBe(0);
   });
@@ -378,22 +386,46 @@ describe('EntryShell route scroll isolation', () => {
   });
 });
 
-describe('EntryShell new project rail', () => {
-  it('creates a blank project directly from the rail plus', async () => {
-    window.localStorage.setItem('od.entry.railOpen', 'false');
+describe('EntryShell project reopen request priority', () => {
+  it('aborts Home cover work, keeps hidden Projects idle, and lets the foreground files read finish', async () => {
+    const files = [{
+      name: 'index.html',
+      path: 'index.html',
+      kind: 'html' as const,
+      mtime: 1,
+      size: 1,
+      mime: 'text/html',
+    }];
+    const fileRequests: Array<RequestInit | undefined> = [];
     const fetchMock = vi.fn(
       async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-        const url = typeof input === 'string' ? input : input instanceof Request ? input.url : String(input);
-        if (url.endsWith('/api/projects') && init?.method === 'POST') {
-          return jsonResponse({
-            project: {
-              id: 'blank-project-1',
-              name: 'Untitled',
-              createdAt: Date.now(),
-              updatedAt: Date.now(),
-            },
-            conversationId: 'conversation-1',
-          });
+        const url = typeof input === 'string'
+          ? input
+          : input instanceof Request
+            ? input.url
+            : String(input);
+        if (url === '/api/projects/project-reopen/files') {
+          // Single-flight (`lib/shared-cancellable-get`) gives every `/files`
+          // reader — cancellable or not — one shared request carrying the
+          // shared AbortSignal, so "is this the background scan?" is the
+          // request ordinal, not the presence of a signal. Request #1 is
+          // Home's cover scan and must hang until it is aborted; the
+          // foreground read that follows it must be answered.
+          const isBackgroundCoverScan = fileRequests.length === 0;
+          fileRequests.push(init);
+          if (isBackgroundCoverScan) {
+            return new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener(
+                'abort',
+                () => reject(new DOMException('Aborted', 'AbortError')),
+                { once: true },
+              );
+            });
+          }
+          return jsonResponse({ files });
+        }
+        if (url.includes('/api/live-artifacts?projectId=project-reopen')) {
+          return jsonResponse({ liveArtifacts: [] });
         }
         if (url.endsWith('/api/community/discord')) {
           return jsonResponse({
@@ -414,36 +446,65 @@ describe('EntryShell new project rail', () => {
           });
         }
         return jsonResponse({});
-      });
+      },
+    );
     globalThis.fetch = fetchMock as typeof fetch;
-    const props = renderHome();
-
-    fireEvent.click(screen.getByTestId('entry-rail-toggle'));
-    fireEvent.click(screen.getByTestId('entry-nav-new-project'));
-
-    await waitFor(() => {
-      expect(screen.getByTestId('new-project-modal')).toBeTruthy();
+    const onOpenProject = vi.fn((projectId: string) => {
+      expect(projectId).toBe('project-reopen');
+      // App leaves EntryShell when it opens ProjectView. Model that boundary
+      // directly so the mounted Home strip must cancel its background probe.
+      cleanup();
     });
-    expect(screen.getByTestId('new-project-panel')).toBeTruthy();
-    expect(props.onOpenProject).not.toHaveBeenCalled();
-    expect(props.onCreateProject).not.toHaveBeenCalled();
-    const createCall = fetchMock.mock.calls.find(
-      ([input, init]) => input === '/api/projects' && init?.method === 'POST',
-    );
-    expect(createCall).toBeUndefined();
-    expect(analyticsMocks.track).toHaveBeenCalledWith(
-      'ui_click',
-      expect.objectContaining({
-        page_name: 'home',
-        area: 'nav',
-        element: 'new_project_plus',
-      }),
-      undefined,
-    );
-  });
 
-  it('opens the new project modal from the Projects tab button', async () => {
-    window.localStorage.setItem('od.entry.railOpen', 'false');
+    renderHome({
+      projects: [{
+        id: 'project-reopen',
+        name: 'Reopen project',
+        skillId: null,
+        designSystemId: null,
+        createdAt: 1,
+        updatedAt: 2,
+        status: { value: 'not_started' },
+      }],
+      onOpenProject,
+    });
+
+    await waitFor(() => expect(fileRequests).toHaveLength(1));
+    const homeSignal = fileRequests[0]?.signal;
+    expect(homeSignal).toBeDefined();
+    // DesignsTab is mounted under EntryShell's hidden Projects pane, but its
+    // own background files/live-artifact scans must remain dormant.
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        String(input).includes('/api/live-artifacts?projectId=project-reopen'),
+      ),
+    ).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole('button', { name: /Reopen project/ }));
+
+    expect(onOpenProject).toHaveBeenCalledTimes(1);
+    expect(homeSignal?.aborted).toBe(true);
+    await expect(fetchProjectFiles('project-reopen')).resolves.toEqual(files);
+    expect(fileRequests).toHaveLength(2);
+    // The foreground read must own a live request of its own: it neither joins
+    // the abandoned scan's dead entry nor inherits its aborted signal.
+    const foregroundSignal = fileRequests[1]?.signal;
+    expect(foregroundSignal).toBeDefined();
+    expect(foregroundSignal).not.toBe(homeSignal);
+    expect(foregroundSignal?.aborted).toBe(false);
+  });
+});
+
+describe('EntryShell new project rail', () => {
+  // The rail's "+ New project" button (`entry-nav-new-project`) is gone in
+  // #5517's rail: `EntryShell` still passes `onNewProject` — with its
+  // `new_project_plus` ui_click — to `EntryNavRail`, but the rail never renders
+  // a control that calls it, so the button and that analytics event are both
+  // unreachable. The spec that drove it is therefore removed; opening the
+  // new-project modal is still covered by the Projects-view CTA below, which is
+  // the surviving entry point.
+
+  it('opens the new project modal from the Projects view new-project button', async () => {
     const fetchMock = vi.fn(
       async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
         const url = typeof input === 'string' ? input : input instanceof Request ? input.url : String(input);
@@ -485,6 +546,10 @@ describe('EntryShell new project rail', () => {
         return jsonResponse({});
       });
     globalThis.fetch = fetchMock as typeof fetch;
+    // Start directly on the Projects view (/projects). The nav rail no longer
+    // has a single "Projects" button — the projects list is its own route,
+    // reachable via /projects or Home's "view all" — so drive the DesignsTab's
+    // own new-project CTA rather than a removed rail button.
     const props = renderHome({
       projects: [
         {
@@ -497,10 +562,8 @@ describe('EntryShell new project rail', () => {
           status: { value: 'not_started' },
         },
       ],
-    });
+    }, '/projects');
 
-    fireEvent.click(screen.getByTestId('entry-rail-toggle'));
-    fireEvent.click(screen.getByTestId('entry-nav-projects'));
     fireEvent.click(screen.getByTestId('designs-new-project'));
 
     await waitFor(() => {
@@ -548,7 +611,9 @@ describe('EntryShell Home submit handoff', () => {
 
     await waitFor(() => expect(onCreateProject).toHaveBeenCalledTimes(1));
     expect(submit.disabled).toBe(true);
-    expect(submit.textContent).toContain('Sending…');
+    // #5517: the submit is icon-only (spinner while sending) — assert the
+    // busy state through aria instead of the removed label text.
+    expect(submit.getAttribute('aria-busy')).toBe('true');
 
     resolveCreate(true);
     await waitFor(() => expect(submit.disabled).toBe(false));
@@ -556,6 +621,269 @@ describe('EntryShell Home submit handoff', () => {
 });
 
 describe('EntryShell onboarding Open Design AMR runtime', () => {
+  it('gates Home on an authoritative signed-out Cloud session without clearing saved setup', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({ loggedIn: false, profile: 'prod', configPath: '/x', user: null }),
+    ) as typeof fetch;
+    const config = baseConfig({
+      onboardingCompleted: true,
+      mode: 'api',
+      apiKey: 'persisted-key',
+      baseUrl: 'https://api.anthropic.com',
+      model: 'claude-sonnet-4-5',
+    });
+    const props = renderHome({ config, amrLoggedIn: false });
+
+    expect(
+      await screen.findByRole('heading', { name: 'Sign in to Open Design' }),
+    ).toBeTruthy();
+    expect(window.location.pathname).toBe('/onboarding');
+    expect(props.onConfigPersist).not.toHaveBeenCalled();
+    expect(props.onModeChange).not.toHaveBeenCalled();
+    expect(props.onAgentChange).not.toHaveBeenCalled();
+  });
+
+  it('shows the model-source chooser after Cloud sign-in without exposing legacy onboarding steps', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({
+        loggedIn: true,
+        profile: 'prod',
+        configPath: '/x',
+        user: { id: 'u', email: 'user@example.com' },
+      }),
+    ) as typeof fetch;
+    renderOnboarding();
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: /Continue \(signed in\)/i }),
+    );
+
+    expect(
+      await screen.findByRole('heading', { name: 'Choose your model source' }),
+    ).toBeTruthy();
+    expect(screen.getByRole('radio', { name: /Open Design Hosted/i })).toBeTruthy();
+    expect(screen.getByRole('radio', { name: /Local Agent/i })).toBeTruthy();
+    expect(screen.getByRole('radio', { name: /Bring Your Own Key/i })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'About you' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Stay in the loop' })).toBeNull();
+    expect(
+      screen.queryByRole('heading', { name: 'Create once, build everywhere' }),
+    ).toBeNull();
+  });
+
+  it('supports arrow-key selection and focus within the model-source radio group', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({
+        loggedIn: true,
+        profile: 'prod',
+        configPath: '/x',
+        user: { id: 'u', email: 'user@example.com' },
+      }),
+    ) as typeof fetch;
+    renderOnboarding();
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: /Continue \(signed in\)/i }),
+    );
+    const hosted = await screen.findByRole('radio', { name: /Open Design Hosted/i });
+    const local = screen.getByRole('radio', { name: /Local Agent/i });
+    hosted.focus();
+    fireEvent.keyDown(hosted, { key: 'ArrowDown' });
+
+    expect(local.getAttribute('aria-checked')).toBe('true');
+    expect(document.activeElement).toBe(local);
+    fireEvent.keyDown(local, { key: 'ArrowUp' });
+    expect(hosted.getAttribute('aria-checked')).toBe('true');
+    expect(document.activeElement).toBe(hosted);
+  });
+
+  it('completes Hosted onboarding once with model-source analytics', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({
+        loggedIn: true,
+        profile: 'prod',
+        configPath: '/x',
+        user: { id: 'u', email: 'user@example.com' },
+      }),
+    ) as typeof fetch;
+    const props = renderOnboarding();
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: /Continue \(signed in\)/i }),
+    );
+    fireEvent.click(await screen.findByRole('button', { name: /^Continue$/i }));
+
+    await waitFor(() => {
+      expect(props.onCompleteOnboarding).toHaveBeenCalledTimes(1);
+    });
+    expect(props.onModeChange).toHaveBeenCalledWith('daemon');
+    expect(props.onAgentChange).toHaveBeenCalledWith('amr');
+    expect(
+      findTrackedEvent<Record<string, unknown>>(
+        'ui_click',
+        (payload) => payload.element === 'amr_cloud',
+      ),
+    ).toMatchObject({
+      area: 'model_source',
+      action: 'select_runtime',
+      step_index: '2',
+      step_name: 'model_source',
+      runtime_type: 'amr_cloud',
+      is_recommended: true,
+    });
+    expect(latestTrackedEvent('onboarding_complete_result')).toMatchObject({
+      result: 'completed',
+      exit_step_name: 'model_source',
+      completion_type: 'completed_without_design_system',
+      runtime_type: 'amr_cloud',
+      has_about_you: false,
+      has_design_system_request: false,
+      source_count: 0,
+    });
+    expect(trackedEvents('onboarding_complete_result')).toHaveLength(1);
+  });
+
+  it('resumes a completed setup after passive reauthentication without changing its model source', async () => {
+    const onAmrLoginStatusChange = vi.fn();
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({
+        loggedIn: true,
+        profile: 'prod',
+        configPath: '/x',
+        user: { id: 'u', email: 'user@example.com' },
+      }),
+    ) as typeof fetch;
+    const props = renderOnboarding({
+      config: baseConfig({
+        onboardingCompleted: true,
+        mode: 'api',
+        apiKey: 'persisted-key',
+        baseUrl: 'https://api.anthropic.com',
+        model: 'claude-sonnet-4-5',
+      }),
+      onAmrLoginStatusChange,
+    });
+
+    await waitFor(() => {
+      expect(props.onCompleteOnboarding).toHaveBeenCalledTimes(1);
+    });
+    expect(props.onModeChange).not.toHaveBeenCalled();
+    expect(props.onAgentChange).not.toHaveBeenCalled();
+    expect(onAmrLoginStatusChange).toHaveBeenCalledWith(
+      expect.objectContaining({ loggedIn: true }),
+    );
+    expect(screen.queryByRole('heading', { name: 'Choose your model source' })).toBeNull();
+    expect(
+      trackedEvents('page_view').filter(([, payload]) =>
+        (payload as Record<string, unknown>).page_name === 'onboarding',
+      ),
+    ).toHaveLength(0);
+    expect(trackedEvents('onboarding_complete_result')).toHaveLength(0);
+  });
+
+  it('returns a completed but invalid setup to the model-source chooser after sign-in', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({
+        loggedIn: true,
+        profile: 'prod',
+        configPath: '/x',
+        user: { id: 'u', email: 'user@example.com' },
+      }),
+    ) as typeof fetch;
+    const props = renderOnboarding({
+      config: baseConfig({
+        onboardingCompleted: true,
+        mode: 'api',
+        apiKey: '',
+        baseUrl: '',
+        model: '',
+      }),
+    });
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: /Continue \(signed in\)/i }),
+    );
+
+    expect(
+      await screen.findByRole('heading', { name: 'Choose your model source' }),
+    ).toBeTruthy();
+    expect(props.onCompleteOnboarding).not.toHaveBeenCalled();
+    expect(props.onModeChange).not.toHaveBeenCalled();
+    expect(props.onAgentChange).not.toHaveBeenCalled();
+  });
+
+  it('requires a successful Local Agent test before persisting and completing setup', async () => {
+    globalThis.fetch = vi.fn(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api/integrations/vela/status')) {
+        return jsonResponse({
+          loggedIn: true,
+          profile: 'prod',
+          configPath: '/x',
+          user: { id: 'u', email: 'user@example.com' },
+        });
+      }
+      if (url.endsWith('/api/test/connection') && init?.method === 'POST') {
+        return jsonResponse({
+          ok: true,
+          kind: 'success',
+          latencyMs: 12,
+          model: 'sonnet',
+          sample: 'pong',
+          agentName: 'Claude Code',
+        });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch;
+    const props = renderOnboarding({
+      config: baseConfig({
+        agentId: 'claude-code',
+        agentModels: { 'claude-code': { model: 'sonnet' } },
+      }),
+    });
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: /Continue \(signed in\)/i }),
+    );
+    fireEvent.click(await screen.findByRole('radio', { name: /Local Agent/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Continue$/i }));
+
+    expect(await screen.findByRole('heading', { name: 'Local Agent' })).toBeTruthy();
+    const continueButton = screen.getByRole('button', { name: /^Continue$/i });
+    expect(continueButton.getAttribute('aria-disabled')).toBe('true');
+    fireEvent.click(screen.getByRole('button', { name: /^Test$/i }));
+    expect(await screen.findByText(/Claude Code replied in 12 ms/i)).toBeTruthy();
+    expect(continueButton.getAttribute('aria-disabled')).toBeNull();
+    fireEvent.click(continueButton);
+
+    await waitFor(() => {
+      expect(props.onCompleteOnboarding).toHaveBeenCalledTimes(1);
+    });
+    expect(props.onConfigPersist).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: 'daemon', agentId: 'claude-code' }),
+    );
+    expect(
+      findTrackedEvent<Record<string, unknown>>(
+        'ui_click',
+        (payload) => payload.element === 'local_coding_agent',
+      ),
+    ).toMatchObject({
+      area: 'model_source',
+      step_name: 'model_source',
+      runtime_type: 'local_cli',
+    });
+    expect(latestTrackedEvent('onboarding_complete_result')).toMatchObject({
+      result: 'completed',
+      exit_step_name: 'runtime_setup',
+      runtime_type: 'local_cli',
+    });
+    expect(
+      trackedEvents('page_view').filter(([, payload]) =>
+        (payload as Record<string, unknown>).area === 'runtime_setup',
+      ),
+    ).toHaveLength(1);
+  });
+
   it('does not auto-select Open Design AMR when the AMR runtime is unavailable', async () => {
     globalThis.fetch = vi.fn(async () =>
       jsonResponse({ loggedIn: false, profile: 'prod', user: null, configPath: '/x' }),
@@ -567,13 +895,13 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
 
     expect(await screen.findByRole('heading', { name: 'Sign in to Open Design' })).toBeTruthy();
     expect(await findCloudSignInButton()).toBeTruthy();
-    openLocalRuntimeSetup();
     expect(screen.queryByRole('button', { name: /Open Design AMR/i })).toBeNull();
 
     await waitFor(() => {
       expect(props.onAgentChange).not.toHaveBeenCalledWith('amr');
     });
-    expect(screen.getByText('Local CLI')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Local Agent/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Bring Your Own Key/i })).toBeNull();
     expect(screen.queryByText('Sign in to continue')).toBeNull();
   });
 
@@ -590,9 +918,9 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
     expect(screen.queryByText('AMR v0.1.0')).toBeNull();
     expect(screen.queryByRole('button', { name: /Sign in to continue/i })).toBeNull();
     expect(screen.queryByRole('link', { name: /Authorize AMR/i })).toBeNull();
-    // The secondary runtime links remain available on the landing.
-    expect(screen.getByRole('button', { name: /Local coding agent/i })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Bring your own key/i })).toBeTruthy();
+    // Model-source choices stay behind the mandatory identity gate.
+    expect(screen.queryByRole('button', { name: /Local Agent/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Bring Your Own Key/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /Open Design AMR/i })).toBeNull();
     expect(screen.queryByRole('link', { name: /Authorize AMR/i })).toBeNull();
     expect(screen.queryByText('Not signed in')).toBeNull();
@@ -600,14 +928,17 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
   });
 
   it('excludes AMR from the Local CLI agent list', async () => {
-    vi.useFakeTimers();
     globalThis.fetch = vi.fn(async () =>
-      jsonResponse({ loggedIn: false, profile: 'prod', user: null, configPath: '/x' }),
+      jsonResponse({
+        loggedIn: true,
+        profile: 'prod',
+        user: { id: 'u', email: 'user@example.com' },
+        configPath: '/x',
+      }),
     ) as typeof fetch;
     renderOnboarding();
 
-    openLocalRuntimeSetup();
-    await vi.advanceTimersByTimeAsync(300);
+    await openLocalRuntimeSetup();
 
     const localPanel = screen.getByText('Local CLI').closest('.onboarding-view__setup-panel');
     expect(localPanel?.textContent).toContain('Claude Code');
@@ -618,7 +949,12 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
     const fetchMock = vi.fn(async (input, init) => {
       const url = String(input);
       if (url.endsWith('/api/integrations/vela/status')) {
-        return jsonResponse({ loggedIn: false, profile: 'prod', user: null, configPath: '/x' });
+        return jsonResponse({
+          loggedIn: true,
+          profile: 'prod',
+          configPath: '/x',
+          user: { id: 'u', email: 'user@example.com' },
+        });
       }
       if (url.endsWith('/api/test/connection') && init?.method === 'POST') {
         return jsonResponse({
@@ -643,10 +979,7 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
       onRefreshAgents: vi.fn(() => [amrAgent(), cliAgent()]),
     });
 
-    fireEvent.click(screen.getByRole('button', { name: /Local coding agent/i }));
-    await waitFor(() => {
-      expect(screen.getByText('Claude Code')).toBeTruthy();
-    });
+    await openLocalRuntimeSetup();
     fireEvent.click(screen.getByRole('button', { name: /^Test$/i }));
 
     await waitFor(() => {
@@ -669,7 +1002,12 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
     const fetchMock = vi.fn(async (input, init) => {
       const url = String(input);
       if (url.endsWith('/api/integrations/vela/status')) {
-        return jsonResponse({ loggedIn: false, profile: 'prod', user: null, configPath: '/x' });
+        return jsonResponse({
+          loggedIn: true,
+          profile: 'prod',
+          user: { id: 'u', email: 'user@example.com' },
+          configPath: '/x',
+        });
       }
       if (url.endsWith('/api/test/connection') && init?.method === 'POST') {
         return jsonResponse({
@@ -688,10 +1026,7 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
       onRefreshAgents: vi.fn(() => [amrAgent(), cliAgent()]),
     });
 
-    fireEvent.click(screen.getByRole('button', { name: /Local coding agent/i }));
-    await waitFor(() => {
-      expect(screen.getByText('Claude Code')).toBeTruthy();
-    });
+    await openLocalRuntimeSetup();
     fireEvent.click(screen.getByRole('button', { name: /^Test$/i }));
 
     const alert = await screen.findByRole('alert');
@@ -794,13 +1129,12 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
     await act(async () => {});
 
     expect(screen.queryByText('Signing in…')).toBeNull();
-    // The landing CTA returns to its signed-out copy and is enabled again,
-    // and the secondary runtime links are available once more.
+    // The landing CTA returns to its signed-out copy and is enabled again.
     const cloudButton = await screen.findByRole('button', {
       name: /Sign in to Open Design/i,
     });
     expect(cloudButton.hasAttribute('disabled')).toBe(false);
-    expect(screen.getByRole('button', { name: /Local coding agent/i })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Local Agent/i })).toBeNull();
 
     fireEvent.click(cloudButton);
     await act(async () => {});
@@ -1012,8 +1346,71 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
     expect(screen.getByText('Signing in…')).toBeTruthy();
     await vi.advanceTimersByTimeAsync(2000);
     await vi.waitFor(() => {
-      expect(screen.getByRole('heading', { name: 'About you' })).toBeTruthy();
+      expect(screen.getByRole('heading', { name: 'Choose your model source' })).toBeTruthy();
     });
+  });
+
+  it('refreshes workspace context, billing, and team projects as soon as onboarding sign-in completes', async () => {
+    // Onboarding's embedded AMR sign-in step (pollAmrLoginCompletion) used to
+    // fire only notifyAmrLoginStatusChanged() on success — unlike
+    // CloudSignInTip's finishSignedIn() and refreshWorkspaceSurfacesAfterOnboarding()
+    // (the two other places a sign-in completes), which fire all three
+    // workspace-refresh notifications. That gap left workspaceContext stale
+    // until finishOnboarding fired it later, so Home's rail briefly rendered
+    // in its signed-out shape (still showing "Sign in to use Open Design
+    // Cloud") right after a successful onboarding sign-in.
+    const { WORKSPACE_CONTEXT_REFRESH_EVENT, WORKSPACE_BILLING_REFRESH_EVENT, TEAM_PROJECTS_CHANGED_EVENT } =
+      await import('../../src/collab/useWorkspaceContext');
+    const contextRefresh = vi.fn();
+    const billingRefresh = vi.fn();
+    const teamProjectsChanged = vi.fn();
+    window.addEventListener(WORKSPACE_CONTEXT_REFRESH_EVENT, contextRefresh);
+    window.addEventListener(WORKSPACE_BILLING_REFRESH_EVENT, billingRefresh);
+    window.addEventListener(TEAM_PROJECTS_CHANGED_EVENT, teamProjectsChanged);
+    try {
+      let statusCalls = 0;
+      const fetchMock = vi.fn(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith('/api/integrations/vela/status')) {
+          statusCalls += 1;
+          return jsonResponse(
+            statusCalls >= 3
+              ? {
+                  loggedIn: true,
+                  profile: 'prod',
+                  user: { id: 'u', email: 'user@example.com' },
+                  configPath: '/x',
+                }
+              : { loggedIn: false, profile: 'prod', user: null, configPath: '/x' },
+          );
+        }
+        if (url.endsWith('/api/integrations/vela/login') && init?.method === 'POST') {
+          return jsonResponse({ pid: 123 }, 202);
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+      globalThis.fetch = fetchMock as typeof fetch;
+      renderOnboarding();
+
+      const signIn = await findCloudSignInButton();
+      vi.useFakeTimers();
+      fireEvent.click(signIn);
+      await act(async () => {});
+      expect(contextRefresh).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(2000);
+      await vi.waitFor(() => {
+        expect(screen.getByRole('heading', { name: 'Choose your model source' })).toBeTruthy();
+      });
+
+      expect(contextRefresh).toHaveBeenCalled();
+      expect(billingRefresh).toHaveBeenCalled();
+      expect(teamProjectsChanged).toHaveBeenCalled();
+    } finally {
+      window.removeEventListener(WORKSPACE_CONTEXT_REFRESH_EVENT, contextRefresh);
+      window.removeEventListener(WORKSPACE_BILLING_REFRESH_EVENT, billingRefresh);
+      window.removeEventListener(TEAM_PROJECTS_CHANGED_EVENT, teamProjectsChanged);
+    }
   });
 
   it('recovers from a transient status failure during login polling and still continues after authorization completes', async () => {
@@ -1053,7 +1450,7 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
 
     await vi.advanceTimersByTimeAsync(4000);
     await vi.waitFor(() => {
-      expect(screen.getByRole('heading', { name: 'About you' })).toBeTruthy();
+      expect(screen.getByRole('heading', { name: 'Choose your model source' })).toBeTruthy();
     });
   });
 
@@ -1549,7 +1946,12 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
     globalThis.fetch = vi.fn(async (input, init) => {
       const url = String(input);
       if (url.endsWith('/api/integrations/vela/status')) {
-        return jsonResponse({ loggedIn: false, profile: 'prod', user: null, configPath: '/x' });
+        return jsonResponse({
+          loggedIn: true,
+          profile: 'prod',
+          user: { id: 'u', email: 'user@example.com' },
+          configPath: '/x',
+        });
       }
       if (url.endsWith('/api/provider/models') && init?.method === 'POST') {
         return jsonResponse({
@@ -1574,7 +1976,7 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
       }),
     });
 
-    fireEvent.click(screen.getByRole('button', { name: /Bring your own key/i }));
+    await openByokRuntimeSetup();
     fireEvent.click(screen.getByRole('button', { name: /Fetch models/i }));
 
     await waitFor(() => {
@@ -1587,7 +1989,12 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
     globalThis.fetch = vi.fn(async (input, init) => {
       const url = String(input);
       if (url.endsWith('/api/integrations/vela/status')) {
-        return jsonResponse({ loggedIn: false, profile: 'prod', user: null, configPath: '/x' });
+        return jsonResponse({
+          loggedIn: true,
+          profile: 'prod',
+          configPath: '/x',
+          user: { id: 'u', email: 'user@example.com' },
+        });
       }
       if (url.endsWith('/api/provider/models') && init?.method === 'POST') {
         return jsonResponse({
@@ -1613,7 +2020,12 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
     }) as typeof fetch;
     const props = renderOnboarding();
 
-    fireEvent.click(screen.getByRole('button', { name: /Bring your own key/i }));
+    fireEvent.click(
+      await screen.findByRole('button', { name: /Continue \(signed in\)/i }),
+    );
+    fireEvent.click(await screen.findByRole('radio', { name: /Bring Your Own Key/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Continue$/i }));
+    expect(await screen.findByRole('heading', { name: 'Bring Your Own Key' })).toBeTruthy();
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'test-api-key' } });
     fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'https://api.anthropic.com' } });
     fireEvent.click(screen.getByRole('button', { name: /Fetch models/i }));
@@ -1627,27 +2039,9 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: /^Continue$/i }));
-    await waitFor(() => {
-      expect(screen.getByRole('heading', { name: 'About you' })).toBeTruthy();
-    });
-    fireEvent.click(screen.getByRole('button', { name: /^Continue$/i }));
-    await waitFor(() => {
-      expect(document.querySelector('.onboarding-view__email-input')).toBeTruthy();
-    });
-    fireEvent.click(screen.getByRole('button', { name: /^Continue$/i }));
-    await waitFor(() => {
-      expect(screen.getByRole('heading', { name: 'Create once, build everywhere' })).toBeTruthy();
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Build a design system' }));
 
-    expect(props.onModeChange).toHaveBeenCalledWith('api');
+    expect(props.onModeChange).not.toHaveBeenCalled();
     expect(props.onApiModelChange).toHaveBeenCalledWith('claude-opus-4-8');
-    expect(props.onPersistByokCredential).toHaveBeenCalledWith(expect.objectContaining({
-      protocol: 'anthropic',
-      apiKey: 'test-api-key',
-      baseUrl: 'https://api.anthropic.com',
-      model: 'claude-opus-4-8',
-    }));
     expect(props.onConfigPersist).toHaveBeenCalled();
     await waitFor(() => {
       expect(props.onCompleteOnboarding).toHaveBeenCalledTimes(1);
@@ -1655,13 +2049,15 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
     expect((props.onConfigPersist as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0]).toMatchObject({
       mode: 'api',
       apiProtocol: 'anthropic',
-      apiKey: '',
+      apiKey: 'test-api-key',
       baseUrl: 'https://api.anthropic.com',
       model: 'claude-opus-4-8',
       apiProviderBaseUrl: null,
-      byokProfileId: 'byok-onboarding-test',
-      byokCredentialConfigured: true,
-      byokCredentialTail: '-key',
+    });
+    expect(latestTrackedEvent('onboarding_complete_result')).toMatchObject({
+      result: 'completed',
+      exit_step_name: 'runtime_setup',
+      runtime_type: 'byok',
     });
   });
 
@@ -1669,7 +2065,12 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
     globalThis.fetch = vi.fn(async (input, init) => {
       const url = String(input);
       if (url.endsWith('/api/integrations/vela/status')) {
-        return jsonResponse({ loggedIn: false, profile: 'prod', user: null, configPath: '/x' });
+        return jsonResponse({
+          loggedIn: true,
+          profile: 'prod',
+          user: { id: 'u', email: 'user@example.com' },
+          configPath: '/x',
+        });
       }
       if (url.endsWith('/api/test/connection') && init?.method === 'POST') {
         const body = JSON.parse(String(init.body ?? '{}'));
@@ -1697,7 +2098,7 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
       }),
     });
 
-    fireEvent.click(screen.getByRole('button', { name: /Bring your own key/i }));
+    await openByokRuntimeSetup();
 
     expect(screen.getByRole('tab', { name: 'Azure OpenAI' }).getAttribute('aria-selected')).toBe(
       'true',
@@ -1747,8 +2148,8 @@ describe('EntryShell onboarding Open Design AMR runtime', () => {
     expect((primary as HTMLButtonElement).disabled).toBe(true);
     expect(document.querySelector('.onboarding-view__card--skeleton')).toBeNull();
     expect(screen.queryByRole('button', { name: /Open Design AMR/i })).toBeNull();
-    expect(screen.getByRole('button', { name: /Local coding agent/i })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Bring your own key/i })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Local Agent/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Bring Your Own Key/i })).toBeNull();
   });
 
   it('renders the cloud sign-in CTA and no legacy AMR card once AMR is available', async () => {

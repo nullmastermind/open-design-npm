@@ -26,6 +26,9 @@ export type EntrySettingsSection =
   | 'integrations'
   | 'mcpClient'
   | 'language'
+  // Legacy deep-link token: the theme setting is gone (the app ships
+  // light-only) and SettingsDialog folds this into General, but the token stays
+  // accepted so an old link does not become a type error at the call site.
   | 'appearance'
   | 'notifications'
   | 'pet'
@@ -35,19 +38,8 @@ export type EntrySettingsSection =
   | 'memory'
   | 'designSystems';
 
-const ENTRY_THEME_OPTIONS: Array<{
-  value: AppTheme;
-  icon: 'sun-moon' | 'sun' | 'moon';
-  labelKey: 'settings.themeSystem' | 'settings.themeLight' | 'settings.themeDark';
-}> = [
-  { value: 'system', icon: 'sun-moon', labelKey: 'settings.themeSystem' },
-  { value: 'light', icon: 'sun', labelKey: 'settings.themeLight' },
-  { value: 'dark', icon: 'moon', labelKey: 'settings.themeDark' },
-];
-
 interface Props {
   config: AppConfig;
-  onThemeChange: (theme: AppTheme) => void;
   onOpenSettings: (section?: EntrySettingsSection) => void;
   // Fired when the gear trigger is clicked. Used by the in-project header to
   // emit the `artifact_header` / `settings` ui_click; the home/entry shell
@@ -60,7 +52,6 @@ interface Props {
 
 export function EntrySettingsMenu({
   config,
-  onThemeChange,
   onOpenSettings,
   onTrackTriggerClick,
   trackingPageName,
@@ -111,7 +102,7 @@ export function EntrySettingsMenu({
   }, [open]);
 
   // surface_view — fire once each time the settings popover opens so the
-  // share / language / appearance funnels have a denominator.
+  // share / language funnels have a denominator.
   useEffect(() => {
     if (!open) return;
     trackSettingsPopoverSurfaceView(analytics.track, {
@@ -149,7 +140,7 @@ export function EntrySettingsMenu({
         >
           <section className="entry-settings-menu__section">
             <div className="entry-settings-menu__section-title">
-              <Icon name="languages" size={13} />
+              <Icon name="languages" size={14} />
               <span>{t('settings.language')}</span>
             </div>
             <div className="entry-settings-menu__select">
@@ -212,7 +203,7 @@ export function EntrySettingsMenu({
                           {active ? (
                             <Icon
                               name="check"
-                              size={12}
+                              size={14}
                               className="entry-settings-menu__option-check"
                             />
                           ) : null}
