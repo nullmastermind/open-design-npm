@@ -101,7 +101,19 @@ import { CloudSignInTip, RailAccountSyncTip } from './CloudSignInTip';
 import { resolveEntryRailAccountFooterState } from './entry-rail-account-state';
 import { LibrarySection } from './LibrarySection';
 import { UpdaterPopup } from './UpdaterPopup';
-import { HomeView } from './HomeView';
+import { WhatsNewPopup } from './WhatsNewPopup';
+import { AmrBalanceDialog } from './AmrBalanceDialog';
+import { AmrLowBalanceDialog, type AmrLowBalanceDecision } from './AmrLowBalanceDialog';
+import {
+  amrBalanceGateScopeForWorkspaceContext,
+  amrBalanceGateScopesMatch,
+  checkAmrBalanceGate,
+  type AmrBalanceGateScope,
+} from '../runtime/amr-balance-gate';
+import { isPaidAmrPlan, resolveAmrPlan } from '../runtime/amr-low-balance-plan';
+import { HomeView, seedHomeComposerPrompt } from './HomeView';
+import { EntryBlankState } from './EntryBlankState';
+import { RecentProjectsStrip } from './RecentProjectsStrip';
 import {
   createPluginAuthoringHandoff,
   createPluginUseHandoff,
@@ -254,9 +266,6 @@ type OnboardingAgentTestState =
 // and `/api/runs` fallbacks resolve to the same plugin id when no
 // `pluginId` is on the request body — plan §3.3 of
 // `specs/current/plugin-driven-flow-plan.md`.
-// Newsletter email validation. Signup itself is disabled in this build — the
-// Newsletter step's email field is inert and submits nothing to any endpoint.
-const NEWSLETTER_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ONBOARDING_BYOK_AUTO_FETCH_DELAY_MS = 300;
 const ONBOARDING_BYOK_AUTO_TEST_DELAY_MS = 500;
 
@@ -1076,6 +1085,64 @@ export function EntryShell({
     scrollContainer.scrollTop = 0;
   }, [view]);
   const analytics = useAnalytics();
+  useEffect(() => {
+    if (view !== 'home' || deepSeekV4FlashCampaignAudience === 'unknown') return;
+    trackDeepSeekCampaignBadgeSurfaceView(analytics.track, {
+      page_name: 'home',
+      area: 'campaign_badge',
+      element: 'deepseek_v4_flash',
+      campaign_id: 'deepseek_v4_flash',
+      user_state: deepSeekV4FlashCampaignAudience,
+    });
+  }, [analytics.track, deepSeekV4FlashCampaignAudience, view]);
+  const openDeepSeekCampaignPricing = useCallback(() => {
+    if (deepSeekV4FlashCampaignAudience === 'unknown') return;
+    trackDeepSeekCampaignBadgeClick(analytics.track, {
+      page_name: 'home',
+      area: 'campaign_badge',
+      element: 'open_pricing',
+      campaign_id: 'deepseek_v4_flash',
+      user_state: deepSeekV4FlashCampaignAudience,
+    });
+    const attribution = recordAmrEntry(
+      analytics.track,
+      'deepseek_workbench_badge',
+      new Date(),
+      {
+        metricsConsent: config.telemetry?.metrics === true,
+        campaignId: 'deepseek_v4_flash',
+        conversionSource: 'deepseek_workbench_badge',
+      },
+    );
+    const deviceId = amrHandoffDeviceId({
+      metricsConsent: config.telemetry?.metrics === true,
+      resolvedDeviceId: getResolvedDeviceId(),
+      installationId: config.installationId,
+    });
+    window.open(
+      attributedAmrUrl(DEEPSEEK_CAMPAIGN_PRICING_URL, attribution, deviceId),
+      '_blank',
+      'noopener,noreferrer',
+    );
+  }, [
+    analytics.track,
+    config.installationId,
+    config.telemetry?.metrics,
+    deepSeekV4FlashCampaignAudience,
+  ]);
+  // 产品拍板 D5: the campaign modal's paid 立即使用 performs the REAL switch —
+  // daemon execution mode + Cloud agent (amr) + DeepSeek V4 Flash — through
+  // the same persistence callbacks the InlineModelSwitcher writes through.
+  // Mode must flip first: a paid user still on BYOK (`mode === 'api'`) would
+  // otherwise keep the BYOK provider even after agent/model ids change.
+  const applyDeepSeekCampaignModel = useCallback(
+    (agentId: string, modelId: string) => {
+      onModeChange('daemon');
+      onAgentChange(agentId);
+      onAgentModelChange(agentId, { model: modelId });
+    },
+    [onAgentChange, onAgentModelChange, onModeChange],
+  );
   function changeView(next: EntryViewKind) {
     const navElement = navElementForView(next);
     if (navElement) {
@@ -1487,19 +1554,15 @@ export function EntryShell({
           />
         ) : null}
         <main className="entry-main entry-main--scroll" ref={entryMainScrollRef}>
-          <div className="entry-main__topbar">
-            <button
-              type="button"
-              className="entry-rail-toggle"
-              onClick={() => setRailOpen((prev) => !prev)}
-              aria-label={t('entry.navExpand')}
-              aria-expanded={railOpen}
-              data-testid="entry-rail-toggle"
-            >
-              <Icon name="panel-left" size={20} />
-            </button>
-            <div className="entry-main__topbar-chips entry-main__topbar-chips--icon-only">
-              {executionSwitcher}
+          {/* #5517: no entry topbar. The rail toggle is the pinned Home tab in
+              the workspace tabs bar (entryRailBridge), the updater popup host
+              lives in the rail footer, and everything below is fixed-position
+              or portalled so it occupies no layout space here. */}
+          <WhatsNewPopup active={view === 'home'} />
+          {view === 'home'
+            && deepSeekV4FlashCampaignAudience !== 'unknown'
+            && typeof document !== 'undefined'
+            ? createPortal(
               <button
                 type="button"
                 className="entry-deepseek-campaign-badge"
@@ -2797,74 +2860,6 @@ function OnboardingView({
       }
     }
     return false;
-  }
-
-  // Survey snapshot. Reads `profileRef.current` rather than `profile`
-  // because Finish-setup may fire within the same render commit as the
-  // user's last dropdown pick, before React has rebound the closure to
-  // the latest state. `'unknown'` covers an untouched field on the
-  // About-you step (the spec keeps the wire type open-string so a new
-  // role / use-case option doesn't force a contract bump).
-  //
-  // This now fires from the completion path (the final brand-extraction step),
-  // so it stamps the About-you step coordinates explicitly instead of
-  // reading the live `step` via `emitOnboardingClick`: the event describes
-  // the About-you submission, not whatever step the user finished on. The
-  // `aboutYouReportedRef` guard keeps it exactly-once per session.
-  function emitAboutYouSubmit(): void {
-    if (aboutYouReportedRef.current) return;
-    const onboardingSessionId = onboardingSessionIdRef.current;
-    if (!onboardingSessionId) return;
-    aboutYouReportedRef.current = true;
-    const snapshot = profileRef.current;
-    const submittedAt = new Date();
-    // The raw "Other" free-text is intentionally excluded from the attribution
-    // profile: it flows into analytics (person properties) and AMR, which must
-    // stay free-text/PII-free. Only the enumerated `source` bucket is carried.
-    // The typed detail is preserved solely in the app-owned Memory note below.
-    const attributionProfile = {
-      role: snapshot.role,
-      orgSize: snapshot.orgSize,
-      useCase: snapshot.useCase,
-      source: snapshot.source,
-      completedAt: submittedAt.toISOString(),
-    };
-    // Persist the survey so later AMR entries (outside onboarding) can forward
-    // the visitor's profile to AMR for paid-conversion segmentation.
-    saveOnboardingProfile(attributionProfile, submittedAt);
-    setOnboardingAttributionPersonProperties(attributionProfile, submittedAt);
-    syncAmrAttributionWithOnboardingProfile(
-      attributionProfile,
-      {
-        metricsConsent: config.telemetry?.metrics === true,
-        odDeviceId: amrHandoffDeviceId({
-          metricsConsent: config.telemetry?.metrics === true,
-          resolvedDeviceId: getResolvedDeviceId(),
-          installationId: config.installationId,
-        }),
-      },
-    );
-    trackOnboardingClick(analytics.track, {
-      page_name: 'onboarding',
-      area: 'about_you',
-      element: 'about_you_submit',
-      action: 'continue',
-      step_index: '2',
-      step_name: 'about_you',
-      onboarding_session_id: onboardingSessionId,
-      role: snapshot.role || 'unknown',
-      organization_size: snapshot.orgSize || 'unknown',
-      use_cases: snapshot.useCase.length > 0 ? snapshot.useCase : ['unknown'],
-      discovery_source: snapshot.source || 'unknown',
-    });
-  }
-
-  // Newsletter signup is disabled in this build: the email field on the
-  // Newsletter step is inert and nothing is sent to any external endpoint.
-  // The function is kept (and still called from the completion path) so the
-  // onboarding step structure and its finalizing-lock wiring stay unchanged.
-  async function submitNewsletterEmail(_rawEmail: string): Promise<void> {
-    // Intentionally a no-op: no outbound request, no opt-in tracking.
   }
 
   async function scanCliAgents(options: { preferExisting?: boolean } = {}) {

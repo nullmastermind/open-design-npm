@@ -116,6 +116,8 @@ export type QuestionFormSubmitHandler = (
   context?: RunContextSelection,
   sourceAssistantMessageId?: string,
 ) => boolean | void | Promise<boolean | void>;
+const viewedInlineQuestionForms = new Set<string>();
+const QUESTION_FORM_DRAFT_STORAGE_PREFIX = "open-design:question-form-draft:";
 
 interface ActionNotice {
   message: string;
@@ -366,6 +368,9 @@ interface Props {
   ) => Promise<{ message?: string; url?: string } | void> | { message?: string; url?: string } | void;
   activePluginActionPaths?: Set<string>;
   hiddenPluginActionPaths?: Set<string>;
+  // Consecutive messages from the same assistant share one identity header.
+  // ChatPane sets this false after the first item in a contiguous run.
+  showRole?: boolean;
   // True only for the most recent assistant message.
   isLast?: boolean;
   // Assistant message id whose run-failure error is rendered as ChatPane's
@@ -501,6 +506,7 @@ function AssistantMessageImpl({
   onRequestPluginFolderAgentAction,
   activePluginActionPaths = new Set(),
   hiddenPluginActionPaths = new Set(),
+  showRole = true,
   isLast,
   errorCardOwnerId = null,
   nextUserContent,
@@ -765,18 +771,69 @@ function AssistantMessageImpl({
     hasEmptyResponse ||
     !!copyMarkdown ||
     canFork;
-  // "Next step" only makes sense once there is a deliverable to act on. Anchor
-  // the whole card (toolbox cascade + Share) on a previewable HTML
-  // artifact — produced this turn or earlier in the project. A pure
-  // clarifying-questions / summary turn that emitted no HTML must not surface
-  // the card (issue: card appeared after a question-only turn with no artifact).
+  const effectiveNextStepVariant: NextStepActionsVariant =
+    nextStepVariant === 'brand-extraction' && (!runSucceeded || !nextStepArtifactName)
+      ? 'brand-programmatic-incomplete'
+      : nextStepVariant === 'default' && (!runSucceeded || !nextStepArtifactName)
+        ? 'project-incomplete'
+        : nextStepVariant;
+  const hasNextStepPrimary =
+    effectiveNextStepVariant === 'brand-extraction'
+      ? !!onNextStepAiOptimize || !!onNextStepCreateDesign || !!onNextStepContinueExtraction
+      : effectiveNextStepVariant === 'brand-extraction-incomplete' ||
+          effectiveNextStepVariant === 'brand-programmatic-incomplete'
+        ? !!onNextStepContinueExtraction || !!onNextStepContinueAiExtraction
+        : effectiveNextStepVariant === 'brand-ai-incomplete'
+          ? !!onNextStepContinueAiExtraction
+        : effectiveNextStepVariant === 'design-system'
+          ? !!onNextStepPromptAction
+          : effectiveNextStepVariant === 'plan'
+            ? !!onNextStepPromptAction
+          : effectiveNextStepVariant === 'project-incomplete'
+            ? !!onNextStepPromptAction ||
+              !!onToolboxAction ||
+              !!onNextStepCreateDesignSystem ||
+              (!!nextStepArtifactName && (!!onArtifactShare || !!onArtifactDownload))
+            : !!onToolboxAction ||
+              !!onNextStepCreateDesignSystem ||
+              (!!nextStepArtifactName && (!!onArtifactShare || !!onArtifactDownload));
+  // A clarification turn terminates its run while the emitted <question-form>
+  // is still waiting for the user inline. Until the immediate
+  // user reply submits that form's answers (skip-all submits through the same
+  // path), the turn is mid-handshake, not settled. Suppressed direction forms
+  // render as a locked pill the user cannot answer, so they don't hold the
+  // card back.
+  const hasPendingQuestionForm = useMemo(() => {
+    if (hasUnterminatedQuestionForm(message.content)) return true;
+    return splitOnQuestionForms(message.content).some(
+      (seg) =>
+        seg.kind === "form" &&
+        !(suppressDirectionForms && isDirectionForm(seg.form)) &&
+        (!nextUserContent || !parseSubmittedAnswers(seg.form, nextUserContent)),
+    );
+  }, [message.content, nextUserContent, suppressDirectionForms]);
+  // "Next step" is a delivery affordance, not a generic terminal-state card.
+  // Keep it out of pure Q&A, failures/cancellations and incomplete Todo turns;
+  // only a successful turn that actually produced something may surface it.
+  const hasTurnDeliverable =
+    turnArtifactOps.length > 0 ||
+    displayedProduced.length > 0 ||
+    pluginActionFolders.length > 0;
+  // Incomplete brand extraction is an explicit recovery workflow, not a
+  // generic failed turn: its Continue action is the only way to resume the
+  // saved extraction state, even when no artifact was produced yet.
+  const isBrandExtractionRecovery =
+    message.runStatus !== 'canceled' &&
+    (effectiveNextStepVariant === 'brand-extraction-incomplete' ||
+      effectiveNextStepVariant === 'brand-programmatic-incomplete' ||
+      effectiveNextStepVariant === 'brand-ai-incomplete');
   const showNextStepActions =
     !streaming &&
-    !!projectId &&
-    runSucceeded &&
-    !!nextStepArtifactName &&
+    unfinishedTodos.length === 0 &&
+    !hasPendingQuestionForm &&
     !!isLast &&
-    !!onToolboxAction;
+    hasNextStepPrimary &&
+    ((runSucceeded && hasTurnDeliverable) || isBrandExtractionRecovery);
   // Pre-output vs working: before any real content (text / thinking / tools /
   // files) the footer shimmers "Preparing…"; the moment content lands it
   // flips to "Working". The elapsed clock stays anchored to the persisted run
@@ -1065,6 +1122,7 @@ function AssistantMessageImpl({
             onDownload={isLast && nextStepFileName ? onArtifactDownload : undefined}
             skills={isLast ? nextStepSkills : undefined}
             toolboxSkillNames={isLast ? toolboxSkillNames : undefined}
+            variant={effectiveNextStepVariant}
           />
         ) : null}
       </div>

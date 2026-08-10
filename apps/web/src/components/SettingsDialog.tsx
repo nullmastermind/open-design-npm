@@ -137,6 +137,22 @@ import { isVisualStabilityMode } from '../utils/visualStability';
 import { byokProviderRequiresApiKey } from '../utils/byokProvider';
 import { XaiOAuthControl } from './XaiOAuthControl';
 import type { MediaProvider } from '../media/models';
+import { Toast } from './Toast';
+import {
+  checkForUpdaterUpdate,
+  clearUpdaterCache,
+  deriveUpdaterModel,
+  downloadUpdaterUpdate,
+  openUpdaterInstaller,
+  quitAfterUpdaterInstallerOpen,
+  readUpdaterStatus,
+  restartSafetyFromActionResult,
+  restartSafetyFromUpdaterStatus,
+  subscribeToUpdaterStatus,
+  type UpdaterActionResult,
+  type UpdaterModel,
+  type UpdaterRestartSafety,
+} from '../lib/updater';
 import { PetSettings } from './pet/PetSettings';
 import { McpClientSection } from './McpClientSection';
 import { DesignSystemsSection } from './DesignSystemsSection';
@@ -1871,6 +1887,121 @@ export function SettingsDialog({
   const [agentCustomModelIds, setAgentCustomModelIds] = useState<
     ReadonlySet<string>
   >(() => new Set());
+  const [aboutUpdaterModel, setAboutUpdaterModel] = useState<UpdaterModel>(() => deriveUpdaterModel(null));
+  const [aboutUpdateActionBusy, setAboutUpdateActionBusy] = useState(false);
+  const [aboutUpdateQuitFailed, setAboutUpdateQuitFailed] = useState(false);
+  const [aboutToast, setAboutToast] = useState<string | null>(null);
+  // Two-stage inline confirm for the destructive manual cache clear.
+  const [clearUpdaterCacheStage, setClearUpdaterCacheStage] = useState<'idle' | 'confirm'>('idle');
+  const [clearUpdaterCacheBusy, setClearUpdaterCacheBusy] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    const unsubscribe = subscribeToUpdaterStatus((status) => {
+      if (!mounted) return;
+      const nextModel = deriveUpdaterModel(status, { hostAvailable: true });
+      setAboutUpdaterModel(nextModel);
+      if (!nextModel.installerOpened) setAboutUpdateQuitFailed(false);
+    });
+    void readUpdaterStatus({ payload: { source: 'settings-about:mount' } }).then((result) => {
+      if (!mounted) return;
+      const nextModel = result.ok ? result.model : deriveUpdaterModel(null, { hostAvailable: false });
+      setAboutUpdaterModel(nextModel);
+      if (!nextModel.installerOpened) setAboutUpdateQuitFailed(false);
+    });
+    return () => {
+      mounted = false;
+      unsubscribe();
+    };
+  }, []);
+
+  const aboutUpdateControl = useMemo(() => {
+    const control = deriveAboutUpdateControl(aboutUpdaterModel, appVersionInfo);
+    if (!aboutUpdateQuitFailed || !aboutUpdaterModel.installerOpened) return control;
+    return {
+      ...control,
+      primaryAction: 'quit' as const,
+      primaryLabelKey: 'updater.quitButton' as const,
+      showReleaseLink: false,
+      statusKey: 'updater.quitFailedTitle' as const,
+      statusTone: 'warning' as const,
+    };
+  }, [aboutUpdateQuitFailed, aboutUpdaterModel, appVersionInfo]);
+
+  // Restart-safety preflight denials stay hard-blocked in Settings → About
+  // (the force path lives in the app-menu UpdateDialog), but the toast must
+  // explain the active-run situation instead of a generic failure.
+  const aboutUpdaterToastText = useCallback(
+    (safety: UpdaterRestartSafety | null, fallback: string): string => {
+      if (safety == null) return fallback;
+      return safety.state === 'blocked'
+        ? t('updater.activeRunsBody', { count: safety.activeRunCount })
+        : t('updater.activeRunsUnknownBody');
+    },
+    [t],
+  );
+
+  const applyAboutUpdaterResult = useCallback((result: UpdaterActionResult): boolean => {
+    if (!result.ok) {
+      setAboutToast(t('settings.updateActionFailed'));
+      return false;
+    }
+    setAboutUpdaterModel(result.model);
+    if (result.model.errorMessage != null) {
+      const safety = restartSafetyFromUpdaterStatus(result.status);
+      setAboutToast(aboutUpdaterToastText(safety, t('settings.updateActionFailed')));
+      return false;
+    }
+    return true;
+  }, [aboutUpdaterToastText, t]);
+
+  const handleAboutUpdateAction = useCallback(async () => {
+    if (aboutUpdateActionBusy || aboutUpdaterModel.busy || aboutUpdateControl.primaryAction == null) return;
+    setAboutUpdateActionBusy(true);
+    setAboutUpdateQuitFailed(false);
+    let quitAttempted = false;
+    try {
+      const options = { payload: { source: 'settings-about' } };
+      if (aboutUpdateControl.primaryAction === 'check') {
+        applyAboutUpdaterResult(await checkForUpdaterUpdate(options));
+      } else if (aboutUpdateControl.primaryAction === 'download') {
+        applyAboutUpdaterResult(await downloadUpdaterUpdate(options));
+      } else if (aboutUpdateControl.primaryAction === 'quit') {
+        quitAttempted = true;
+        const quitResult = await quitAfterUpdaterInstallerOpen(options);
+        if (!quitResult.ok) {
+          setAboutUpdateQuitFailed(true);
+          setAboutToast(aboutUpdaterToastText(restartSafetyFromActionResult(quitResult), t('updater.quitFailedTitle')));
+        }
+      } else {
+        const installed = applyAboutUpdaterResult(await openUpdaterInstaller(options));
+        if (installed) {
+          quitAttempted = true;
+          const quitResult = await quitAfterUpdaterInstallerOpen(options);
+          if (!quitResult.ok) {
+            setAboutUpdateQuitFailed(true);
+            setAboutToast(aboutUpdaterToastText(restartSafetyFromActionResult(quitResult), t('updater.quitFailedTitle')));
+          }
+        }
+      }
+    } catch {
+      if (quitAttempted) setAboutUpdateQuitFailed(true);
+      setAboutToast(t('settings.updateActionFailed'));
+    } finally {
+      setAboutUpdateActionBusy(false);
+    }
+  }, [
+    aboutUpdateActionBusy,
+    aboutUpdateControl.primaryAction,
+    aboutUpdaterModel.busy,
+    aboutUpdaterToastText,
+    applyAboutUpdaterResult,
+    t,
+  ]);
+
+  const handleOpenReleaseNotes = useCallback(() => {
+    void openExternalUrl(OPEN_DESIGN_RELEASES_URL);
+  }, []);
 
   // Manual updater/launcher cache clear — the disaster-recovery action for
   // stuck update state. The desktop owns the capability; this handler only
@@ -6008,6 +6139,16 @@ export function SettingsDialog({
                 </Button>
               </div>
             </section>
+          ) : null}
+
+          {activeSection === 'workspace' && showWorkspaceSettings ? (
+            <SettingsWorkspaceSection context={workspaceContext} />
+          ) : null}
+          {aboutToast ? (
+            <Toast
+              message={aboutToast}
+              onDismiss={() => setAboutToast(null)}
+            />
           ) : null}
           </div>
         </div>

@@ -465,6 +465,7 @@ describe('NextStepActions', () => {
     fireEvent.mouseEnter(screen.getByTestId('next-step-more-share'));
     fireEvent.click(screen.getByTestId('next-step-share-download'));
     expect(h.onDownload).toHaveBeenCalledWith('landing.html');
+
   });
 
   it('hides the toolbox rows when no toolbox handler is wired', () => {

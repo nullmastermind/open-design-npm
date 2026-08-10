@@ -1,8 +1,11 @@
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
+import {
+} from '@open-design/contracts';
 import {
   LOCALE_LABEL,
   LOCALES,
@@ -15,8 +18,9 @@ import {
   trackSettingsPopoverClick,
   trackSettingsPopoverSurfaceView,
 } from '../analytics/events';
-import type { AppConfig, AppTheme } from '../types';
+import type { AppConfig } from '../types';
 import { Icon } from './Icon';
+
 
 export type EntrySettingsSection =
   | 'execution'
@@ -65,7 +69,6 @@ export function EntrySettingsMenu({
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const langListRef = useRef<HTMLDivElement | null>(null);
-  const activeTheme = config.theme ?? 'system';
 
   useEffect(() => {
     if (!open) setLangOpen(false);
@@ -110,6 +113,7 @@ export function EntrySettingsMenu({
       area: 'settings_popover',
     });
   }, [open, analytics.track, pageName]);
+
 
   return (
     <div className="entry-settings-menu" ref={wrapRef}>
@@ -216,41 +220,6 @@ export function EntrySettingsMenu({
             </div>
           </section>
 
-          <section className="entry-settings-menu__section">
-            <div className="entry-settings-menu__section-title">
-              <Icon name="palette" size={13} />
-              <span>{t('settings.appearance')}</span>
-            </div>
-            <div className="entry-settings-menu__theme-row">
-              {ENTRY_THEME_OPTIONS.map((option) => {
-                const active = activeTheme === option.value;
-                return (
-                  <button
-                    key={option.value}
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={active}
-                    className={`entry-settings-menu__theme${
-                      active ? ' is-active' : ''
-                    }`}
-                    onClick={() => {
-                      trackSettingsPopoverClick(analytics.track, {
-                        page_name: pageName,
-                        area: 'settings_popover',
-                        element: 'appearance',
-                        value: option.value,
-                      });
-                      onThemeChange(option.value);
-                      setOpen(false);
-                    }}
-                  >
-                    <Icon name={option.icon} size={13} />
-                    <span>{t(option.labelKey)}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </section>
 
           <div className="entry-settings-menu__divider" aria-hidden />
 

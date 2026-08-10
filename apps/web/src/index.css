@@ -6,6 +6,7 @@
 @import './styles/base.css';
 @import '../../../packages/components/src/styles.css';
 @import './styles/primitives.css';
+@import './styles/plan-badge.css';
 @import './styles/workspace/terminal.css';
 @import './styles/shell.css';
 @import './styles/chat.css';

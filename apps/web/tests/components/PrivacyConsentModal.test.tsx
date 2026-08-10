@@ -6,9 +6,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PrivacyConsentModal } from '../../src/components/PrivacyConsentModal';
 import { I18nProvider } from '../../src/i18n';
 
-function renderModal(overrides?: { onAccept?: () => void }) {
-  const onAccept = overrides?.onAccept ?? vi.fn();
-  render(
+const analyticsTrack = vi.hoisted(() => vi.fn());
+
+vi.mock('../../src/analytics/provider', () => ({
+  useAnalytics: () => ({
+    track: analyticsTrack,
+  }),
+}));
+
+function renderModal(overrides?: { onShare?: () => void; onDecline?: () => void }) {
+  const onShare = overrides?.onShare ?? vi.fn();
+  const onDecline = overrides?.onDecline ?? vi.fn();
+  const result = render(
     <I18nProvider initial="en">
       <PrivacyConsentModal onShare={onShare} onDecline={onDecline} />
     </I18nProvider>,
@@ -41,9 +50,24 @@ describe('PrivacyConsentModal', () => {
     expect(footer.textContent ?? '').toMatch(/Privacy/);
   });
 
-  it('invokes onAccept when the acknowledgement button is clicked', () => {
-    const { onAccept } = renderModal();
-    fireEvent.click(screen.getByRole('button', { name: 'I get it' }));
-    expect(onAccept).toHaveBeenCalledTimes(1);
+  it('invokes onShare when the share button is clicked', () => {
+    const { onShare, onDecline } = renderModal();
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+    expect(onShare).toHaveBeenCalledTimes(1);
+    expect(onDecline).not.toHaveBeenCalled();
+  });
+
+  it('invokes onDecline when the decline button is clicked', () => {
+    const { onShare, onDecline } = renderModal();
+    fireEvent.click(screen.getByRole('button', { name: "Don't share" }));
+    expect(onDecline).toHaveBeenCalledTimes(1);
+    expect(onShare).not.toHaveBeenCalled();
+  });
+
+  it('does not track the decline click before opt-out is persisted', () => {
+    const { onDecline } = renderModal();
+    fireEvent.click(screen.getByRole('button', { name: "Don't share" }));
+    expect(onDecline).toHaveBeenCalledTimes(1);
+    expect(analyticsTrack).not.toHaveBeenCalled();
   });
 });

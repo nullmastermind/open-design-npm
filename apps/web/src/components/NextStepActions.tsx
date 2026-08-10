@@ -223,6 +223,8 @@ interface Props {
   skills?: SkillSummary[];
   // Resolved `@skill` names per featured action, shown in the hover detail.
   toolboxSkillNames?: Partial<Record<DesignToolboxActionId, string | null>>;
+  // Contribute the artifact to the Open Design community gallery.
+  variant?: NextStepActionsVariant;
 }
 
 const FLYOUT_GAP = 8;
@@ -330,6 +332,7 @@ export function NextStepActions({
   onPickSkill,
   skills = [],
   toolboxSkillNames,
+  variant = 'default',
 }: Props) {
   const { t, locale } = useI18n();
   const analytics = useAnalytics();
@@ -446,6 +449,7 @@ export function NextStepActions({
     onDownload(fileName);
     closeAll();
   }, [closeAll, fileName, onDownload, track]);
+
 
   const handleToolboxAction = useCallback(
     (id: DesignToolboxActionId) => {
@@ -587,11 +591,28 @@ export function NextStepActions({
     return source.slice(0, toolboxQuery ? 14 : 8);
   }, [skills, toolboxQuery, locale]);
 
-  // Share group is available whenever any of its actions can fire.
+  const visiblePlanActions = useMemo(() => {
+    if (resolvedPlanFileName && resolvedArtifactFileName) {
+      return [PLAN_MERGE_DOC_ARTIFACT_ACTION, PLAN_IMPROVE_ARTIFACT_ACTION];
+    }
+    if (resolvedPlanFileName) {
+      return [PLAN_GENERATE_ACTION, PLAN_IMPROVE_DOC_ACTION];
+    }
+    if (resolvedArtifactFileName) {
+      return [PLAN_IMPROVE_ARTIFACT_ACTION];
+    }
+    return [];
+  }, [resolvedArtifactFileName, resolvedPlanFileName]);
+
+  // Share group is available whenever any of its three actions can fire.
   const canShare = !!(fileName && onShare);
   const canDownload = !!(fileName && onDownload);
   const hasShareGroup = canShare || canDownload;
-  const hasMore = !!onToolboxAction || hasShareGroup;
+  const showCreateDesignSystem = (
+    variant === 'default' ||
+    variant === 'project-incomplete'
+  ) && !!onCreateDesignSystem;
+  const hasMore = showCreateDesignSystem || !!onToolboxAction || hasShareGroup;
   const showToolbox = !!onToolboxAction;
   const showPlanRows = variant === 'plan' && visiblePlanActions.length > 0 && !!onPromptAction;
   const showProjectIncompleteRows = variant === 'project-incomplete' && !!onPromptAction;

@@ -16,6 +16,15 @@ import type {
   ImportLocalDesignSystemRequest,
   ImportLocalDesignSystemResponse,
   ReplaceProjectWorkingDirResponse,
+  ProjectFileTextPreviewResponse,
+  ProjectFileResponse,
+  ProjectPreviewUrlResponse,
+  ProjectFileVersion,
+  ProjectFileVersionSource,
+  ProjectFileVersionResponse,
+  ProjectFileVersionsResponse,
+  RestoreProjectFileVersionResponse,
+  WorkspaceCollabContext,
 } from '@open-design/contracts';
 import type {
   AgentInfo,

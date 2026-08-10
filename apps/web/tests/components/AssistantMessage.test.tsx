@@ -242,7 +242,6 @@ describe('AssistantMessage feedback gate', () => {
 
     expect(onForkFromMessage).toHaveBeenCalledTimes(1);
   });
-
   it('does not show the fork action while the assistant is streaming', () => {
     render(
       <AssistantMessage

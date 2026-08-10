@@ -24,9 +24,31 @@
 // The gate is `workspaceType` + permissions, never the billing/provider axis — a
 // personal_byok workspace still has full team features.
 
-import { useEffect, useRef, type ReactNode } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  type Ref,
+} from 'react';
+import { coalescedGet } from '../lib/coalesced-get';
+import type {
+  WorkspaceActiveResponse,
+  WorkspaceBillingSummary,
+  WorkspaceCollabContext,
+  WorkspaceDirectoryItem,
+  WorkspaceDirectoryResponse,
+} from '@open-design/contracts';
+import {
+  fetchVelaLoginStatus,
+  formatVelaBalanceUsd,
+  velaLogout,
+} from '../providers/daemon';
+import { resetCloudSignInTipDismissal } from './CloudSignInTip';
+import { SignOutConfirmDialog } from './SignOutConfirmDialog';
+import { notifyAmrLoginStatusChanged } from './amrLoginPolling';
 import { Icon } from './Icon';
-import { GITHUB_STARS_FALLBACK_LABEL, formatStars, useGithubStars } from './useGithubStars';
 import { PlanWordmark, planBadgeTierForWorkspace } from './PlanWordmark';
 import { RemixIcon } from './RemixIcon';
 import { InviteDialog } from './InviteDialog';
@@ -643,7 +665,6 @@ export function EntryNavRail({
   // Sign-out confirm gate (recvqgMWpJZqhL): the menu item only ARMS the
   // confirmation dialog; the real logout chain runs on explicit confirm.
   const [confirmSignOut, setConfirmSignOut] = useState(false);
-  const githubStars = useGithubStars();
   // Signed-in account email for the menu head (#5517 shows it under the
   // display name). The workspace context carries no email, so lazily read the
   // vela login-status projection the first time the menu opens — never on
@@ -1166,68 +1187,6 @@ export function EntryNavRail({
                   >
                     <Icon name="sparkles" size={15} /> {t('entry.accountFeatureRequest')}
                   </a>
-                  {/* #5517: the GitHub/Discord/X/mail badges move off the rail
-                      footer into a compact social row inside the account menu. */}
-                  <div className="entry-nav-rail__menu-social">
-                    <a
-                      className="entry-nav-rail__menu-social-btn"
-                      role="menuitem"
-                      href={REPO_URL}
-                      {...externalLinkProps}
-                      aria-label={`GitHub · ${githubStars == null ? GITHUB_STARS_FALLBACK_LABEL : formatStars(githubStars)} stars`}
-                      title={`GitHub · ${githubStars == null ? GITHUB_STARS_FALLBACK_LABEL : formatStars(githubStars)} stars`}
-                      onClick={() => {
-                        trackAccountAction('github');
-                        setAccountOpen(false);
-                      }}
-                    >
-                      <Icon name="github-filled" size={15} />
-                      <span className="entry-nav-rail__menu-social-count">
-                        {githubStars == null ? GITHUB_STARS_FALLBACK_LABEL : formatStars(githubStars)}
-                      </span>
-                    </a>
-                    <a
-                      className="entry-nav-rail__menu-social-btn"
-                      role="menuitem"
-                      href={DISCORD_URL}
-                      {...externalLinkProps}
-                      aria-label={t('entry.discordAria')}
-                      title={t('entry.discordAria')}
-                      onClick={() => {
-                        trackAccountAction('discord');
-                        setAccountOpen(false);
-                      }}
-                    >
-                      <Icon name="discord" size={15} />
-                    </a>
-                    <a
-                      className="entry-nav-rail__menu-social-btn"
-                      role="menuitem"
-                      href={X_URL}
-                      {...externalLinkProps}
-                      aria-label="@OpenDesignHQ"
-                      title="@OpenDesignHQ"
-                      onClick={() => {
-                        trackAccountAction('twitter');
-                        setAccountOpen(false);
-                      }}
-                    >
-                      <span className="entry-nav-rail__menu-x" aria-hidden>X</span>
-                    </a>
-                    <a
-                      className="entry-nav-rail__menu-social-btn"
-                      role="menuitem"
-                      href={CONTACT_EMAIL_URL}
-                      aria-label={t('entry.mailAria')}
-                      title={t('entry.mailAria')}
-                      onClick={() => {
-                        trackAccountAction('email');
-                        setAccountOpen(false);
-                      }}
-                    >
-                      <Icon name="mail" size={15} />
-                    </a>
-                  </div>
                   <div className="entry-nav-rail__menu-divider" />
                   <button
                     type="button"
@@ -1585,6 +1544,47 @@ export function EntryNavRail({
           </>
         )}
       </div>
+      {/* Skip the footer entirely when it has nothing to show — an empty
+          shell here read as a dead white strip under the account row.
+          `footerUpdaterSlot` is only ever set in the signed-out shell: with a
+          cloud identity the updater host rides the account row instead (see
+          `updaterSlot`), so the footer must not render a second host. */}
+      {footerNotice || footerUpdaterSlot ? (
+        <div className="entry-nav-rail__footer">
+          {footerNotice}
+          {footerUpdaterSlot ? (
+            <div className="entry-rail-actions">{footerUpdaterSlot}</div>
+          ) : null}
+        </div>
+      ) : null}
+      </div>
+
+      {/* Panel + unread polling live here (outside the hover menu, which
+          unmounts when closed); the 消息中心 menu row above just opens it. */}
+      <MessageCenter
+        hideTrigger
+        returnFocusRef={messageCenterReturnFocusRef}
+        open={messageCenterOpen}
+        onOpenChange={setMessageCenterOpen}
+        onUnreadCountChange={setMessageUnreadCount}
+        onOpenNotificationSettings={onOpenSettings ? () => onOpenSettings('notifications') : undefined}
+      />
+
+      <InviteDialog
+        open={inviteOpen}
+        onClose={() => setInviteOpen(false)}
+        workspaceContext={context}
+        canAssignRoles={canInviteMembers}
+        availableSeats={context?.seatSummary?.availableSeats}
+        entryFrom="workspace_switcher"
+        onUpgrade={
+          upgradeUrl
+            ? () => {
+                window.open(upgradeUrl, '_blank', 'noopener,noreferrer');
+              }
+            : undefined
+        }
+      />
     </nav>
   );
 }

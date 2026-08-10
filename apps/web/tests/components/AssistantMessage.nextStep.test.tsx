@@ -98,7 +98,33 @@ describe('AssistantMessage next-step affordance', () => {
     expect(screen.queryByTestId('next-step-actions')).toBeNull();
   });
 
-  it('does not render the card when the turn produced no previewable HTML artifact', () => {
+  it('does not render after a simple answer with no deliverable', () => {
+    render(
+      <AssistantMessage
+        message={baseMessage({ producedFiles: [] })}
+        streaming={false}
+        projectId="proj-1"
+        isLast
+        {...handlers()}
+      />,
+    );
+    expect(screen.queryByTestId('next-step-actions')).toBeNull();
+  });
+
+  it('does not render for a simple answer without a project id', () => {
+    render(
+      <AssistantMessage
+        message={baseMessage({ producedFiles: [] })}
+        streaming={false}
+        isLast
+        {...handlers()}
+      />,
+    );
+    expect(screen.queryByTestId('next-step-actions')).toBeNull();
+  });
+
+  it('renders project recovery actions when the turn produced no previewable artifact', () => {
+    const h = handlers();
     render(
       <AssistantMessage
         message={baseMessage({ producedFiles: [producedFile('notes.md', 'text')] })}
