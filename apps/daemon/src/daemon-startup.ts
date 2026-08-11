@@ -161,12 +161,27 @@ export async function runDaemonCliStartup(argv: string[], options: { printHelp?:
   }
   const { host, open, port } = parsed.config;
 
-  const runtime = await startDaemonRuntime({
-    host,
-    logListening: true,
-    openBrowser: open,
-    port,
-  });
+  // Without this catch a bind failure (EADDRINUSE from a previous run left
+  // listening) becomes an unhandled rejection at the CLI top level, which
+  // Node turns into a bare exit 1 with no message. Surface the actual
+  // reason instead — "port in use" is by far the common case.
+  let runtime: StartedDaemonRuntime;
+  try {
+    runtime = await startDaemonRuntime({
+      host,
+      logListening: true,
+      openBrowser: open,
+      port,
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'EADDRINUSE') {
+      console.error(`[od] cannot start: port ${port} on ${host} is already in use.`);
+      console.error('[od] Stop the daemon already running on that port, or pick another one with --port <port> / OD_PORT=<port>.');
+    } else {
+      console.error(`[od] daemon failed to start: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    process.exit(1);
+  }
   let shuttingDown = false;
   const stop = () => {
     if (shuttingDown) {
