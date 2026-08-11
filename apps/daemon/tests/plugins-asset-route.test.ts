@@ -190,3 +190,25 @@ describe('GET /api/plugins/:id/asset/* markdown media type', () => {
     expect(resp.headers.get('content-type')).toBe('application/octet-stream');
   });
 });
+
+// Sandboxed plugin preview iframes have opaque origin (sandbox="allow-scripts"
+// with no allow-same-origin), so every sub-resource fetch they make carries
+// Origin: null.  The /api origin middleware must let those requests through and
+// the asset route must reply with Access-Control-Allow-Origin: * so the iframe
+// can read the response (e.g. draw an image onto a canvas).
+describe('GET /api/plugins/:id/asset/* with Origin: null (sandboxed iframe)', () => {
+  it('passes the origin middleware and returns 200 with ACAO: *', async () => {
+    const resp = await fetch(
+      `${baseUrl}/api/plugins/asset-plugin/asset/surfaces/index.html`,
+      { headers: { origin: 'null' } },
+    );
+    expect(resp.status).toBe(200);
+    expect(resp.headers.get('access-control-allow-origin')).toBe('*');
+  });
+
+  it('does not set ACAO on requests without Origin: null', async () => {
+    const resp = await fetch(`${baseUrl}/api/plugins/asset-plugin/asset/surfaces/index.html`);
+    expect(resp.status).toBe(200);
+    expect(resp.headers.get('access-control-allow-origin')).toBeNull();
+  });
+});

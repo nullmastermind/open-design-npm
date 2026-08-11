@@ -375,6 +375,12 @@ export function registerPluginAssetRoutes(app: Express, deps: RegisterPluginAsse
       try { buf = await fsp.readFile(resolved); } catch { return res.status(404).json({ error: 'asset not found' }); }
       res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self' data: blob:; media-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'none'; frame-ancestors 'self'");
       res.setHeader('X-Content-Type-Options', 'nosniff');
+      // The asset is served inside a sandboxed plugin preview iframe (Origin: null).
+      // Mirror the skills asset route's allowance so the iframe can fetch image
+      // bytes without triggering a CORS block.
+      if (req.headers.origin === 'null') {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+      }
       const ext = path.extname(resolved).toLowerCase();
       const ct = ext === '.html' ? 'text/html; charset=utf-8' : ext === '.js' ? 'application/javascript; charset=utf-8' : ext === '.css' ? 'text/css; charset=utf-8' : ext === '.json' ? 'application/json; charset=utf-8' : ext === '.md' || ext === '.markdown' ? 'text/markdown; charset=utf-8' : ext === '.svg' ? 'image/svg+xml' : ext === '.png' ? 'image/png' : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'application/octet-stream';
       res.setHeader('Content-Type', ct);

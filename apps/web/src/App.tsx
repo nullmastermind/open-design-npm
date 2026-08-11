@@ -254,18 +254,11 @@ const AGENT_FOCUS_REFRESH_THROTTLE_MS = 10_000;
  * rather than "what just happened" keeps it from being re-decided mid-session.
  */
 export function shouldRouteToFirstRunOnboarding(
-  config: AppConfig,
-  pathname: string,
+  _config: AppConfig,
+  _pathname: string,
 ): boolean {
-  if (config.onboardingCompleted === true) return false;
-  if (
-    pathname.startsWith('/projects/')
-    || pathname.startsWith('/collab-demo')
-    || pathname.startsWith('/community')
-  ) {
-    return false;
-  }
-  return true;
+  // Sign-in gate disabled — app is fully public.
+  return false;
 }
 
 function workspaceProjectListViewForRoute(route: Route): WorkspaceProjectListView {
@@ -359,8 +352,7 @@ function clearStaleAmrModelChoiceOnProfileChange(
 export function resetExecutionConfigAfterSignOut(config: AppConfig): AppConfig {
   return {
     ...config,
-    onboardingCompleted: false,
-    mode: DEFAULT_CONFIG.mode,
+    onboardingCompleted: true,
     agentId: null,
     agentModels: {},
     agentCliEnv: {},

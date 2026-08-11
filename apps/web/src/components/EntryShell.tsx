@@ -97,8 +97,6 @@ import { DesignSystemsTab } from './DesignSystemsTab';
 import { BrandsTab } from './BrandsTab';
 import { EntryNavRail, type EntryView as EntryViewKind } from './EntryNavRail';
 import { ProjectSearchModal } from './ProjectSearchModal';
-import { CloudSignInTip, RailAccountSyncTip } from './CloudSignInTip';
-import { resolveEntryRailAccountFooterState } from './entry-rail-account-state';
 import { LibrarySection } from './LibrarySection';
 import { UpdaterPopup } from './UpdaterPopup';
 import { WhatsNewPopup } from './WhatsNewPopup';
@@ -594,11 +592,7 @@ export function EntryShell({
   const route = useRoute();
   const view: EntryViewKind = route.kind === 'home' ? route.view : 'home';
   useEffect(() => {
-    // The entry shell is the authenticated Home surface. A definitive
-    // signed-out result returns it to the Cloud identity gate while leaving
-    // the saved model source untouched for passive reauthentication.
-    if (amrLoggedIn !== false || view === 'onboarding') return;
-    navigate({ kind: 'home', view: 'onboarding' }, { replace: true });
+    // Sign-in gate disabled — no re-gate on sign-out.
   }, [amrLoggedIn, view]);
   // The one shared workspace context. Any non-null context is a real workspace
   // (personal or team); workspace surfaces gate on B's permission bits, not on
@@ -608,10 +602,6 @@ export function EntryShell({
   // unresolved or unavailable authority into an anonymous, unbound create.
   const workspaceContextState = useWorkspaceContext();
   const { context: workspaceContext, loading: workspaceLoading } = workspaceContextState;
-  const accountFooterState = resolveEntryRailAccountFooterState(
-    workspaceContextState,
-    amrLoggedIn,
-  );
   const workspaceContextRef = useRef(workspaceContext);
   workspaceContextRef.current = workspaceContext;
   const workspaceBillingResponse = useWorkspaceBillingResponse();
@@ -1412,9 +1402,7 @@ export function EntryShell({
    * Onboarding is where a signed-out user signs IN, so the workspace context
    * the shell resolved before it is stale by definition. Without this the rail
    * came back in its signed-out shape — no workspace switcher, no 草稿 / 全部项目
-   * / Workspace 设置, and the "sign in to Open Design Cloud" callout still in
-   * the bottom-left corner (#140) — until a focus or the 30s poll happened to
-   * re-read it. `CloudSignInTip` fires the same three after its own sign-in.
+   * / Workspace 设置 — until a focus or the 30s poll happened to re-read it.
    *
    * EVERY exit from onboarding must call this. It used to live inline in
    * `finishOnboarding` only, so the "go build a design system" door left the
@@ -1532,15 +1520,6 @@ export function EntryShell({
           updaterSlot={updaterSlot}
           // A loading or unavailable workspace read is not proof of sign-out.
           // Keep the account slot neutral until Cloud answers successfully;
-          // only a successful null context (or known local sign-out) may show
-          // the sign-in card.
-          footerNotice={
-            accountFooterState === 'syncing'
-              ? <RailAccountSyncTip />
-              : accountFooterState === 'sign-in'
-                ? <CloudSignInTip />
-                : null
-          }
         />
         {projectSearchOpen ? (
           <ProjectSearchModal
@@ -2827,12 +2806,8 @@ function OnboardingView({
           });
         }
         notifyAmrLoginStatusChanged();
-        // Onboarding may sit on this step for a while before finishOnboarding
-        // fires refreshWorkspaceSurfacesAfterOnboarding() — without firing
-        // these here too, Home's rail can render in its stale signed-out
-        // shape (still showing the "sign in to Open Design Cloud" callout)
-        // for however long that gap lasts. Mirrors CloudSignInTip's own
-        // finishSignedIn().
+        // Fire workspace refreshes immediately after sign-in so Home's rail
+        // renders in its signed-in shape without waiting for the next poll.
         notifyWorkspaceContextRefresh();
         notifyWorkspaceBillingRefresh();
         notifyTeamProjectsChanged();

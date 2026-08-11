@@ -2378,6 +2378,14 @@ export interface StartServerResult {
   routeInventory: import('./route-registration-guard.js').RouteRegistration[];
 }
 
+/**
+ * Routes that serve content to sandboxed iframes (Origin: null) for
+ * read-only purposes. All other /api routes reject Origin: null.
+ * Exported so tests can import the real regex instead of maintaining a copy.
+ */
+export const NULL_ORIGIN_SAFE_GET_RE =
+  /^\/projects\/[^/]+\/(?:raw|preview)\/|^\/codex-pets\/[^/]+\/spritesheet$|^\/asset-cache$|^\/plugins\/[^/]+\/asset\/.+$|^\/skills\/[^/]+\/assets\/.+$/;
+
 export async function startServer({
   port = 7456,
   host = normalizeDaemonBindHost(process.env.OD_BIND_HOST),
@@ -2578,8 +2586,7 @@ export async function startServer({
 
   // Routes that serve content to sandboxed iframes (Origin: null) for
   // read-only purposes.  All other /api routes reject Origin: null.
-  const _NULL_ORIGIN_SAFE_GET_RE =
-    /^\/projects\/[^/]+\/(?:raw|preview)\/|^\/codex-pets\/[^/]+\/spritesheet$|^\/asset-cache$/;
+  const _NULL_ORIGIN_SAFE_GET_RE = NULL_ORIGIN_SAFE_GET_RE;
   const _POWERED_PREVIEW_SAFE_RE = /^\/projects\/[^/]+\/powered\/.+$/u;
 
   // Reject cross-origin requests to API endpoints.
