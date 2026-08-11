@@ -25,6 +25,7 @@ import {
 import {
   anonymizeArtifactId,
   artifactKindToTracking,
+  type ArtifactPublishResultProps,
   type TrackingFileVersionSource,
   type TrackingArtifactKind,
   type TrackingProjectKind,
@@ -33,10 +34,16 @@ import {
 import { useAnalytics } from '../analytics/provider';
 import { exportErrorCode } from '../analytics/export-error-code';
 import { deployErrorCode } from '../analytics/deploy-error-code';
-import { trackIframeLoad } from '../observability/iframe-error';
+import { publishErrorCode } from '../analytics/publish-error-code';
+import {
+  reportPreviewIframeMessage,
+  subscribePreviewIframeMessages,
+  trackIframeLoad,
+} from '../observability/iframe-error';
 import {
   trackArtifactExportResult,
   trackArtifactDeployResult,
+  trackArtifactPublishResult,
   trackArtifactHeaderClick,
   trackArtifactToolbarClick,
   trackCommentPopoverClick,
@@ -352,7 +359,7 @@ const POWERED_PREVIEW_SANDBOX =
   'allow-scripts allow-same-origin allow-downloads allow-popups allow-forms allow-modals allow-pointer-lock';
 const POWERED_PREVIEW_ALLOW =
   'accelerometer; autoplay; camera; cross-origin-isolated; fullscreen; gamepad; gyroscope; microphone; xr-spatial-tracking';
-const PREVIEW_BRIDGE_QUERY = 'odPreviewBridge=scroll&odPreviewBridge=selection&odPreviewBridge=snapshot';
+const PREVIEW_BRIDGE_QUERY = 'odPreviewBridge=scroll&odPreviewBridge=selection&odPreviewBridge=snapshot&odPreviewBridge=observability';
 // Generic runtime UI state carried across the URL-load -> srcDoc transport
 // switch. This preserves the current page of multi-page prototypes while
 // leaving artifact scripts and business state inside their sandboxed frames.
@@ -605,6 +612,7 @@ const htmlPreviewZoomState = new Map<string, { zoom: number; zoomMode: 'auto' | 
 // canvas-grow recovery in the auto-fit effect fires.
 const MAX_CACHED_PREVIEW_CONTENT_WIDTHS = 128;
 const PREVIEW_CONTENT_WIDTH_CACHE_VERSION = 2;
+const SRC_DOC_ACTIVATION_RECOVERY_TIMEOUT_MS = 1500;
 let previewContentMeasurementDocumentEpochSequence = 0;
 let previewContentMeasurementHostInstanceSequence = 0;
 let previewTransportGenerationSequence = 0;
@@ -1887,6 +1895,7 @@ export const FileViewer = memo(function FileViewer({
     return (
       <ReactComponentViewer
         projectId={projectId}
+        projectKind={projectKind}
         file={file}
         onOpenFileReplacing={onOpenFileReplacing}
         projectName={projectName}
@@ -1897,6 +1906,7 @@ export const FileViewer = memo(function FileViewer({
         metricsConsent={metricsConsent}
         installationId={installationId}
         viewerOnly={viewerOnly}
+        workspaceActive={workspaceActive}
       />
     );
   }
@@ -6288,6 +6298,7 @@ function ReactModulePointer({
 
 function ReactComponentViewer({
   projectId,
+  projectKind,
   file,
   onOpenFileReplacing,
   projectName,
@@ -6298,8 +6309,10 @@ function ReactComponentViewer({
   metricsConsent = false,
   installationId,
   viewerOnly = false,
+  workspaceActive = true,
 }: {
   projectId: string;
+  projectKind: TrackingProjectKind;
   file: ProjectFile;
   onOpenFileReplacing?: (openName: string, closeName: string) => void;
   projectName?: string;
@@ -6310,15 +6323,23 @@ function ReactComponentViewer({
   metricsConsent?: boolean;
   installationId?: string | null;
   viewerOnly?: boolean;
+  workspaceActive?: boolean;
 }) {
   const t = useT();
+  const analytics = useAnalytics();
+  // `FileWorkspace` keeps a non-active viewer mounted, so an in-flight publish
+  // can settle after the user has switched away. The ref carries the LIVE value
+  // into those continuations; the captured prop would still read the
+  // render-time `true`.
+  const workspaceActiveRef = useRef(workspaceActive);
+  workspaceActiveRef.current = workspaceActive;
   const { workspaceContext } = useProjectCollabContext();
   const [mode, setMode] = useState<'preview' | 'source'>('preview');
   const [source, setSource] = useState<string | null>(null);
   const [srcDoc, setSrcDoc] = useState('');
   const [reloadKey, setReloadKey] = useState(0);
   const [shareMenuOpen, setShareMenuOpen] = useState(false);
-  const [unifiedActionTab, setUnifiedActionTab] = useState<'share' | 'export' | 'send'>('share');
+  const [unifiedActionTab, setUnifiedActionTab] = useState<'share' | 'export'>('share');
   const [shareAccess, setShareAccess] = useState<'private' | 'workspace'>('private');
   const [shareAccessMenuOpen, setShareAccessMenuOpen] = useState(false);
   const [shareAccessConfirm, setShareAccessConfirm] = useState<'private' | 'workspace' | null>(null);
@@ -6480,16 +6501,70 @@ function ReactComponentViewer({
     // render as unpublished.
   }, [projectId, file.name, canPublishPublic, viewerOnly]);
 
+  // Shared identity fields for the publish-flow events (ReactComponentViewer copy).
+  // `artifactKindToTracking` only recognises HTML through the renderer id — a React
+  // component's `file.kind` is `code`, which would degrade to `unknown` — and this
+  // viewer is reached only through the `react-component` renderer match, so its
+  // renderer identity is a constant.
+  function publishTrackingIdentity() {
+    return {
+      artifact_id: anonymizeArtifactId({ projectId, fileName: file.name }),
+      artifact_kind: artifactKindToTracking({
+        rendererId: 'react-component',
+        fileKind: file.kind ?? null,
+      }),
+      project_id: projectId,
+      project_kind: projectKind,
+    } as const;
+  }
+
+  // Retained (inert) viewers must never report analytics — same rule the
+  // HtmlViewer copy of this flow follows. Only the tracking is gated; the
+  // publish/unpublish calls themselves stay unconditional.
+  const firePublishFlowClick = (element: 'publish_file' | 'copy_publish_link') => {
+    if (!workspaceActive) return;
+    trackShareOptionPopoverClick(analytics.track, {
+      page_name: 'artifact',
+      area: 'share_option_popover',
+      element,
+      ...publishTrackingIdentity(),
+    });
+  };
+
+  const firePublishResult = (
+    outcome: Pick<
+      ArtifactPublishResultProps,
+      'action' | 'result' | 'error_code' | 'publish_duration_ms'
+    >,
+  ) => {
+    // Read the live ref, not the captured prop: a request can start while this
+    // viewer is active and settle after the user switches tabs.
+    if (!workspaceActiveRef.current) return;
+    trackArtifactPublishResult(analytics.track, {
+      page_name: 'artifact',
+      area: 'share_option_popover',
+      ...outcome,
+      ...publishTrackingIdentity(),
+    });
+  };
+
   async function publishCurrentFilePublic() {
     if (viewerOnly || publishingPublicFile) return;
     const requestProjectId = projectId;
     const requestFileName = file.name;
     const requestSeq = ++publicFileRequestSeqRef.current;
+    firePublishFlowClick('publish_file');
+    const publishStarted = performance.now();
     setPublishingPublicFile(true);
     setPublishLinkFeedback(null);
     setPublishFailureKey(null);
     try {
       const response = await publishProjectFilePublic(requestProjectId, requestFileName, workspaceContext);
+      firePublishResult({
+        action: 'publish',
+        result: 'success',
+        publish_duration_ms: Math.round(performance.now() - publishStarted),
+      });
       const current = publicFileIdentityRef.current;
       if (
         publicFileRequestSeqRef.current !== requestSeq ||
@@ -6502,6 +6577,12 @@ function ReactComponentViewer({
       setPublishedFileSlug(response.slug);
     } catch (error) {
       console.warn('[FileViewer] failed to publish public file', error);
+      firePublishResult({
+        action: 'publish',
+        result: 'failed',
+        error_code: publishErrorCode(error),
+        publish_duration_ms: Math.round(performance.now() - publishStarted),
+      });
       if (publicFileRequestSeqRef.current === requestSeq) {
         setPublishLinkFeedback('failed');
         setPublishFailureKey(publicFilePublishFailureKey(error));
@@ -6517,11 +6598,17 @@ function ReactComponentViewer({
     const requestFileName = file.name;
     const requestSlug = publishedFileSlug;
     const requestSeq = ++publicFileRequestSeqRef.current;
+    const unpublishStarted = performance.now();
     setPublishingPublicFile(true);
     setPublishLinkFeedback(null);
     setPublishFailureKey(null);
     try {
       await unpublishProjectFilePublic(requestProjectId, requestFileName, requestSlug, workspaceContext);
+      firePublishResult({
+        action: 'unpublish',
+        result: 'success',
+        publish_duration_ms: Math.round(performance.now() - unpublishStarted),
+      });
       const current = publicFileIdentityRef.current;
       if (
         publicFileRequestSeqRef.current !== requestSeq ||
@@ -6534,6 +6621,12 @@ function ReactComponentViewer({
       setPublishedFileSlug('');
     } catch (error) {
       console.warn('[FileViewer] failed to unpublish public file', error);
+      firePublishResult({
+        action: 'unpublish',
+        result: 'failed',
+        error_code: publishErrorCode(error),
+        publish_duration_ms: Math.round(performance.now() - unpublishStarted),
+      });
       if (publicFileRequestSeqRef.current === requestSeq) {
         setPublishLinkFeedback('failed');
         setPublishFailureKey(publicFilePublishFailureKey(error));
@@ -6544,6 +6637,7 @@ function ReactComponentViewer({
   }
 
   async function copyPublishedFileLink() {
+    firePublishFlowClick('copy_publish_link');
     let ok = false;
     try {
       if (publishedFileUrl && typeof navigator !== 'undefined' && navigator.clipboard) {
@@ -6673,41 +6767,52 @@ function ReactComponentViewer({
             <>
               <span className="viewer-divider" aria-hidden />
               <div className="share-menu chrome-share-menu chrome-share-menu--unified" ref={shareRef}>
-                <button
-                  type="button"
-                  className="viewer-action primary viewer-action-export od-tooltip"
-                  aria-haspopup="menu"
-                  aria-expanded={shareMenuOpen}
-                  disabled={viewerOnly}
-                  title={viewerOnly ? viewerOnlyDisabledTitle : t('fileViewer.shareLabel')}
-                  data-tooltip={viewerOnly ? viewerOnlyDisabledTitle : t('fileViewer.shareLabel')}
-                  data-tooltip-placement="bottom"
-                  onClick={() => setShareMenuOpen((v) => !v)}
-                >
-                  <span className="export-action-spacer" aria-hidden />
-                  <span>{t('fileViewer.shareLabel')}</span>
-                  <RemixIcon name="arrow-down-s-line" size={14} />
-                </button>
+                {/* Share and Export are separate toolbar intents again (the
+                    0.18.0 unified tabs buried Export one level deep); they
+                    still share one popover shell so switching keeps the menu
+                    anchored in place. Export leads — it is the far more used
+                    of the two (see the chrome header copy). */}
+                {(['export', 'share'] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    type="button"
+                    // Export leads and Share is the quieter neighbour — the same
+                    // hierarchy the Html chrome gets from `chrome-action-dark` on
+                    // Export only. One shared class here would give both intents
+                    // the accent fill and flatten that distinction.
+                    className={
+                      tab === 'export'
+                        ? 'viewer-action primary viewer-action-export od-tooltip'
+                        : 'viewer-action od-tooltip'
+                    }
+                    aria-haspopup="menu"
+                    aria-expanded={shareMenuOpen && unifiedActionTab === tab}
+                    disabled={viewerOnly}
+                    title={viewerOnly ? viewerOnlyDisabledTitle : undefined}
+                    data-tooltip={
+                      viewerOnly
+                        ? viewerOnlyDisabledTitle
+                        : tab === 'share'
+                          ? t('fileViewer.unifiedShareTab')
+                          : t('fileViewer.unifiedExportTab')
+                    }
+                    data-tooltip-placement="bottom"
+                    onClick={() => {
+                      setShareMenuOpen((v) => !(v && unifiedActionTab === tab));
+                      setUnifiedActionTab(tab);
+                    }}
+                  >
+                    <span className="export-action-spacer" aria-hidden />
+                    <span>
+                      {tab === 'share'
+                        ? t('fileViewer.unifiedShareTab')
+                        : t('fileViewer.unifiedExportTab')}
+                    </span>
+                    <RemixIcon name="arrow-down-s-line" size={14} />
+                  </button>
+                ))}
                 {shareMenuOpen ? (
                   <div className="share-menu-popover chrome-unified-popover" role="menu">
-                    <div className="chrome-unified-tabs" role="tablist" aria-label={t('fileViewer.unifiedShareAria')}>
-                      {([
-                        ['share', t('fileViewer.unifiedShareTab')],
-                        ['export', t('fileViewer.unifiedExportTab')],
-                        ['send', t('fileViewer.unifiedSendTab')],
-                      ] as const).map(([tab, label]) => (
-                        <button
-                          key={tab}
-                          type="button"
-                          className={unifiedActionTab === tab ? 'is-active' : undefined}
-                          role="tab"
-                          aria-selected={unifiedActionTab === tab}
-                          onClick={() => setUnifiedActionTab(tab)}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
                     {unifiedActionTab === 'share' ? (
                       <div className="chrome-unified-panel chrome-unified-panel--share">
                         {/* Sharing a project INTO a workspace needs a team on the other
@@ -6720,19 +6825,29 @@ function ReactComponentViewer({
                             public single-file publish card below uses; that one is
                             deliberately workspace-agnostic. */}
                         {workspaceContextHasTeamIdentity(workspaceContext) ? (
-                        <div className="chrome-share-card">
-                          <div className="chrome-share-card__header">
-                            <span className="share-menu-icon"><RemixIcon name="team-line" size={16} /></span>
-                            <span className="share-menu-text">
-                              <span>{t('fileViewer.workspaceShareTitle')}</span>
-                              <small>
-                                {shareAccess === 'private'
-                                  ? t('fileViewer.workspaceSharePrivateDescription')
-                                  : t('fileViewer.workspaceShareWorkspaceDescription')}
-                              </small>
-                            </span>
-                          </div>
-                          <div className="chrome-access-select">
+                        <>
+                        {/* Access control gets the same section-label + row treatment as the
+                            publish / deploy / save tiers below; its explanation moves into the
+                            trailing "?" instead of a card sub-line. */}
+                        <div className="share-menu-section-label share-menu-section-label--help" role="presentation">
+                          <span>{t('fileViewer.workspaceShareTitle')}</span>
+                          <button
+                            type="button"
+                            className="share-menu-help od-tooltip"
+                            data-testid="workspace-access-help"
+                            aria-label={shareAccess === 'private'
+                              ? t('fileViewer.workspaceSharePrivateDescription')
+                              : t('fileViewer.workspaceShareWorkspaceDescription')}
+                            data-tooltip={shareAccess === 'private'
+                              ? t('fileViewer.workspaceSharePrivateDescription')
+                              : t('fileViewer.workspaceShareWorkspaceDescription')}
+                            data-tooltip-placement="bottom"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <RemixIcon name="question-line" size={14} />
+                          </button>
+                        </div>
+                        <div className="chrome-access-select">
                             <button
                               type="button"
                               className="chrome-access-trigger"
@@ -6787,25 +6902,31 @@ function ReactComponentViewer({
                               </div>
                             ) : null}
                           </div>
-                        </div>
+                        </>
                         ) : null}
+                        {/* Menu row like the tiers below — same structure as
+                            the HtmlViewer copy. */}
                         {canPublishPublic ? (
-                        <div className="chrome-share-card">
-                          <div className="chrome-share-card__header">
-                            <span className="share-menu-icon"><RemixIcon name="broadcast-line" size={16} /></span>
-                            <span className="share-menu-text">
-                              <span>{t('fileViewer.publishSingleFileTitle')}</span>
-                              <small>{t('fileViewer.publishSingleFileDescription')}</small>
-                            </span>
-                          </div>
-                          {publishFailureKey ? (
-                            <p className="chrome-publish-error" role="status">
-                              {t(publishFailureKey)}
-                            </p>
-                          ) : null}
-                          {filePublished ? (
-                            <>
-                              <div className="chrome-publish-url" title={publishedFileUrl}>
+                        <>
+                        {/* The "?" lives on the section label, not inside the publish
+                            menuitem — see the HtmlViewer copy for why. */}
+                        <div className="share-menu-section-label share-menu-section-label--help" role="presentation">
+                          <span>{t('fileViewer.shareMenuPublishViaOd')}</span>
+                          <button
+                            type="button"
+                            className="share-menu-help od-tooltip"
+                            data-testid="publish-help"
+                            aria-label={t('fileViewer.publishSingleFileDescription')}
+                            data-tooltip={t('fileViewer.publishSingleFileDescription')}
+                            data-tooltip-placement="bottom"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <RemixIcon name="question-line" size={14} />
+                          </button>
+                        </div>
+                        {filePublished ? (
+                          <div className="chrome-publish-plain">
+                            <div className="chrome-publish-url" title={publishedFileUrl}>
                                 {publishedFileUrl}
                               </div>
                               <div className="chrome-publish-actions">
@@ -6833,28 +6954,36 @@ function ReactComponentViewer({
                                 >
                                   {t('fileViewer.unpublishFile')}
                                 </button>
-                              </div>
-                            </>
-                          ) : (
-                            <button
-                              type="button"
-                              className="chrome-publish-primary"
-                              disabled={viewerOnly || publishingPublicFile}
-                              aria-busy={publishingPublicFile}
-                              title={viewerOnly ? viewerOnlyDisabledTitle : undefined}
-                              onClick={() => {
-                                void publishCurrentFilePublic();
-                              }}
-                            >
+                            </div>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            className="share-menu-item"
+                            role="menuitem"
+                            disabled={viewerOnly || publishingPublicFile}
+                            aria-busy={publishingPublicFile}
+                            title={viewerOnly ? viewerOnlyDisabledTitle : undefined}
+                            onClick={() => {
+                              void publishCurrentFilePublic();
+                            }}
+                          >
+                            <span className="share-menu-icon">
                               <RemixIcon
                                 name={publishingPublicFile ? 'loader-4-line' : 'upload-cloud-2-line'}
                                 size={15}
                                 className={publishingPublicFile ? 'icon-spin' : undefined}
                               />
-                              {publishingPublicFile ? t('fileViewer.publishingFile') : t('fileViewer.publishFile')}
-                            </button>
-                          )}
-                        </div>
+                            </span>
+                            <span>{publishingPublicFile ? t('fileViewer.publishingFile') : t('fileViewer.publishSingleFileTitle')}</span>
+                          </button>
+                        ) }
+                        {publishFailureKey ? (
+                          <p className="chrome-publish-error" role="status">
+                            {t(publishFailureKey)}
+                          </p>
+                        ) : null}
+                        </>
                         ) : null}
                       </div>
                     ) : null}
@@ -6908,37 +7037,21 @@ function ReactComponentViewer({
                         </button>
                       </div>
                     ) : null}
-                    {unifiedActionTab === 'send' ? (
-                      <div className="chrome-unified-panel chrome-unified-panel--handoff">
-                        {viewerOnly ? (
-                          <button
-                            type="button"
-                            className="share-menu-item"
-                            role="menuitem"
-                            disabled
-                            title={viewerOnlyDisabledTitle}
-                          >
-                            <span className="share-menu-icon"><RemixIcon name="send-plane-line" size={15} /></span>
-                            <span>{viewerOnlyDisabledTitle}</span>
-                          </button>
-                        ) : (
-                          <HandoffButton
-                            projectId={projectId}
-                            projectName={projectName}
-                            projectDir={projectDir}
-                            agents={agents}
-                            artifactId={artifactId}
-                            artifactKind={handoffArtifactKind}
-                            metricsConsent={metricsConsent}
-                            installationId={installationId}
-                            embedded
-                          />
-                        )}
-                      </div>
-                    ) : null}
                   </div>
                 ) : null}
               </div>
+              {viewerOnly ? null : (
+                <HandoffButton
+                  projectId={projectId}
+                  projectName={projectName}
+                  projectDir={projectDir}
+                  agents={agents}
+                  artifactId={artifactId}
+                  artifactKind={handoffArtifactKind}
+                  metricsConsent={metricsConsent}
+                  installationId={installationId}
+                />
+              )}
             </>
           ) : null}
         </div>
@@ -7648,7 +7761,7 @@ function HtmlViewer({
   // active tab is `unifiedActionTab`. External share/download requests below just
   // preselect the tab and open this one popover.
   const [deployMenuOpen, setDeployMenuOpen] = useState(false);
-  const [unifiedActionTab, setUnifiedActionTab] = useState<'share' | 'export' | 'send'>('share');
+  const [unifiedActionTab, setUnifiedActionTab] = useState<'share' | 'export'>('share');
   const [shareAccess, setShareAccess] = useState<'private' | 'workspace'>('private');
   const [shareAccessMenuOpen, setShareAccessMenuOpen] = useState(false);
   const [shareAccessConfirm, setShareAccessConfirm] = useState<'private' | 'workspace' | null>(null);
@@ -7811,16 +7924,71 @@ function HtmlViewer({
     sourceAuthorizationScopeKey,
   ]);
 
+  // Shared identity fields for the publish-flow events (HtmlViewer copy).
+  // `artifactKindToTracking` only recognises HTML through the renderer id — an HTML
+  // artifact's `file.kind` is `html`, which would degrade to `unknown` — and this
+  // viewer is reached only through the `html` / `deck-html` renderer matches, which
+  // is exactly what the `isDeck` prop is derived from.
+  function publishTrackingIdentity() {
+    return {
+      artifact_id: anonymizeArtifactId({ projectId, fileName: file.name }),
+      artifact_kind: artifactKindToTracking({
+        rendererId: isDeck ? 'deck-html' : 'html',
+        fileKind: file.kind ?? null,
+      }),
+      project_id: projectId,
+      project_kind: projectKind,
+    } as const;
+  }
+
+  // Background (inert) HtmlViewer instances must never report analytics, same
+  // as every other emission site in this component. Only the tracking is
+  // gated — the publish/unpublish calls themselves stay unconditional.
+  const firePublishFlowClick = (element: 'publish_file' | 'copy_publish_link') => {
+    if (!workspaceActive) return;
+    trackShareOptionPopoverClick(analytics.track, {
+      page_name: 'artifact',
+      area: 'share_option_popover',
+      element,
+      ...publishTrackingIdentity(),
+    });
+  };
+
+  const firePublishResult = (
+    outcome: Pick<
+      ArtifactPublishResultProps,
+      'action' | 'result' | 'error_code' | 'publish_duration_ms'
+    >,
+  ) => {
+    // Read the live ref, not the captured prop: a publish/unpublish request can
+    // start while this viewer is active and settle after the user switches tabs,
+    // and the in-flight continuation still holds the render-time `true`.
+    if (!workspaceActiveRef.current) return;
+    trackArtifactPublishResult(analytics.track, {
+      page_name: 'artifact',
+      area: 'share_option_popover',
+      ...outcome,
+      ...publishTrackingIdentity(),
+    });
+  };
+
   async function publishCurrentFilePublic() {
     if (viewerOnly || publishingPublicFile) return;
     const requestProjectId = projectId;
     const requestFileName = file.name;
     const requestSeq = ++publicFileRequestSeqRef.current;
+    firePublishFlowClick('publish_file');
+    const publishStarted = performance.now();
     setPublishingPublicFile(true);
     setPublishLinkFeedback(null);
     setPublishFailureKey(null);
     try {
       const response = await publishProjectFilePublic(requestProjectId, requestFileName, workspaceContext);
+      firePublishResult({
+        action: 'publish',
+        result: 'success',
+        publish_duration_ms: Math.round(performance.now() - publishStarted),
+      });
       const current = publicFileIdentityRef.current;
       if (
         publicFileRequestSeqRef.current !== requestSeq ||
@@ -7833,6 +8001,12 @@ function HtmlViewer({
       setPublishedFileSlug(response.slug);
     } catch (error) {
       console.warn('[FileViewer] failed to publish public file', error);
+      firePublishResult({
+        action: 'publish',
+        result: 'failed',
+        error_code: publishErrorCode(error),
+        publish_duration_ms: Math.round(performance.now() - publishStarted),
+      });
       if (publicFileRequestSeqRef.current === requestSeq) {
         setPublishLinkFeedback('failed');
         setPublishFailureKey(publicFilePublishFailureKey(error));
@@ -7848,11 +8022,17 @@ function HtmlViewer({
     const requestFileName = file.name;
     const requestSlug = publishedFileSlug;
     const requestSeq = ++publicFileRequestSeqRef.current;
+    const unpublishStarted = performance.now();
     setPublishingPublicFile(true);
     setPublishLinkFeedback(null);
     setPublishFailureKey(null);
     try {
       await unpublishProjectFilePublic(requestProjectId, requestFileName, requestSlug, workspaceContext);
+      firePublishResult({
+        action: 'unpublish',
+        result: 'success',
+        publish_duration_ms: Math.round(performance.now() - unpublishStarted),
+      });
       const current = publicFileIdentityRef.current;
       if (
         publicFileRequestSeqRef.current !== requestSeq ||
@@ -7865,6 +8045,12 @@ function HtmlViewer({
       setPublishedFileSlug('');
     } catch (error) {
       console.warn('[FileViewer] failed to unpublish public file', error);
+      firePublishResult({
+        action: 'unpublish',
+        result: 'failed',
+        error_code: publishErrorCode(error),
+        publish_duration_ms: Math.round(performance.now() - unpublishStarted),
+      });
       if (publicFileRequestSeqRef.current === requestSeq) {
         setPublishLinkFeedback('failed');
         setPublishFailureKey(publicFilePublishFailureKey(error));
@@ -7875,6 +8061,7 @@ function HtmlViewer({
   }
 
   async function copyPublishedFileLink() {
+    firePublishFlowClick('copy_publish_link');
     let ok = false;
     try {
       if (publishedFileUrl && typeof navigator !== 'undefined' && navigator.clipboard) {
@@ -9687,6 +9874,27 @@ function HtmlViewer({
     setPreviewSrcUrl(effectiveBasePreviewSrcUrl);
     setUrlSelectionBridgeReady(false);
   }, [activeFilesRefreshPending, effectiveBasePreviewSrcUrl, previewSrcCarriesCurrentRefresh]);
+  const previewObservabilitySeenRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    previewObservabilitySeenRef.current = new Set();
+  }, [projectId, file.name, reloadKey]);
+  useEffect(() => {
+    if (mode !== 'preview') return undefined;
+    return subscribePreviewIframeMessages(({ source: messageSource, data }) => {
+      if (!workspaceActiveRef.current) return;
+      const activeFrame = useUrlLoadPreview
+        ? urlPreviewIframeRef.current
+        : srcDocPreviewIframeRef.current;
+      if (!activeFrame || messageSource !== activeFrame.contentWindow) return;
+      reportPreviewIframeMessage(data, {
+        surface: 'artifact_preview',
+        renderMode: useUrlLoadPreview ? 'url_load' : 'srcdoc',
+        artifactId: anonymizeArtifactId({ projectId, fileName: file.name }),
+        artifactKind: handoffArtifactKind ?? artifactKindToTracking({ fileKind: file.kind ?? null }),
+        projectId,
+      }, previewObservabilitySeenRef.current);
+    });
+  }, [file.kind, file.name, handoffArtifactKind, mode, projectId, useUrlLoadPreview]);
   useEffect(() => {
     const activeFrame = useUrlLoadPreview
       ? urlPreviewIframeRef.current
@@ -9905,6 +10113,7 @@ function HtmlViewer({
       editBridge: true,
       paletteBridge: false,
       previewFocusGuard: true,
+      previewObservability: true,
       // Embed the reload counter so the srcdoc string differs across reloads
       // even when the fetched HTML bytes are identical (issue #4650).
       reloadKey,
@@ -10027,6 +10236,26 @@ function HtmlViewer({
   const lazySrcDocTransport = useMemo(() => buildLazySrcdocTransport(), []);
   const [srcDocTransportResetKey, setSrcDocTransportResetKey] = useState(0);
   const [srcDocShellReady, setSrcDocShellReady] = useState(false);
+  const srcDocRecoveryAttemptedGenerationRef = useRef<string | null>(null);
+  const [srcDocRecoveryGeneration, setSrcDocRecoveryGeneration] = useState<string | null>(null);
+  const recoverUnacknowledgedSrcDocTransport = useCallback((generation: string) => {
+    if (
+      !workspaceActiveRef.current
+      || expectedSrcDocTransportGenerationRef.current !== generation
+    ) {
+      return;
+    }
+    const frame = srcDocPreviewIframeRef.current;
+    const ready = readySrcDocTransportRef.current;
+    if (frame && ready?.frame === frame && ready.generation === generation) return;
+    if (srcDocRecoveryAttemptedGenerationRef.current === generation) return;
+    srcDocRecoveryAttemptedGenerationRef.current = generation;
+    readySrcDocTransportRef.current = null;
+    activatedSrcDocTransportHtmlRef.current = null;
+    setSrcDocShellReady(false);
+    setSrcDocRecoveryGeneration(generation);
+    setSrcDocTransportResetKey((key) => key + 1);
+  }, []);
   // Sticky once the srcDoc iframe has materialized the real artifact for the
   // first time (i.e. the first entry into Mark/Edit/Comment/Inspect). Until
   // then the srcDoc iframe stays on the lazy shell — so passive preview never
@@ -10095,6 +10324,32 @@ function HtmlViewer({
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
   }, [replayPreviewBridgeModes, workspaceActive]);
+  // React can commit a fresh `srcdoc` attribute while Chromium aborts the
+  // corresponding about:srcdoc navigation. The host then believes the latest
+  // revision is applied, but the iframe stays on its old/empty document until
+  // Code -> Preview happens to remount it. Every real srcDoc carries an exact
+  // generation ACK; if the active frame never acknowledges that generation,
+  // retry through the small lazy shell automatically; Chromium can commit that
+  // shell even when it aborts a large direct srcDoc navigation, after which the
+  // existing ready handshake safely document.write's the latest HTML. One
+  // fallback per generation avoids a loop when an authored document is
+  // fundamentally unable to execute scripts.
+  useEffect(() => {
+    if (!workspaceActive || mode !== 'preview' || useUrlLoadPreview || !srcDoc) return;
+    const generation = srcDocTransportGeneration;
+    if (srcDocRecoveryAttemptedGenerationRef.current === generation) return;
+    const timeout = window.setTimeout(() => {
+      recoverUnacknowledgedSrcDocTransport(generation);
+    }, SRC_DOC_ACTIVATION_RECOVERY_TIMEOUT_MS);
+    return () => window.clearTimeout(timeout);
+  }, [
+    mode,
+    recoverUnacknowledgedSrcDocTransport,
+    srcDoc,
+    srcDocTransportGeneration,
+    useUrlLoadPreview,
+    workspaceActive,
+  ]);
   useEffect(() => {
     if (!workspaceActive) return;
     function onMessage(ev: MessageEvent) {
@@ -10119,7 +10374,8 @@ function HtmlViewer({
   // re-entering a mode is an instant visibility swap rather than a re-mount +
   // re-load. Direct-mount path (no #2361/#2791 postMessage race).
   const useLazySrcDocTransport =
-    !manualEditRequiresSrcDoc && !captureModeActive && useUrlLoadPreview && !srcDocMaterialized;
+    srcDocRecoveryGeneration === srcDocTransportGeneration
+    || (!manualEditRequiresSrcDoc && !captureModeActive && useUrlLoadPreview && !srcDocMaterialized);
   // Park on a static "loop detected" document once the guard reports a runaway
   // redirect. A self-redirecting artifact is forced onto the srcDoc iframe by
   // `needsRedirectGuard`, so swapping this content is the reliable stop — the
@@ -10265,6 +10521,25 @@ function HtmlViewer({
     }, '*');
     return true;
   }, [srcDoc, srcDocTransportGeneration]);
+  function verifyLoadedSrcDocTransport(target: HTMLIFrameElement | null) {
+    if (!target || target !== srcDocPreviewIframeRef.current) return;
+    const generation = srcDocTransportGeneration;
+    if (!useUrlLoadPreview && srcDoc) {
+      // `load` may belong to a provisional about:blank/about:srcdoc document.
+      // Drop any earlier ACK and require the document that actually completed
+      // this load to answer the generation probe. This closes the window where
+      // a provisional document announces from its head and is then aborted.
+      readySrcDocTransportRef.current = null;
+    }
+    target.contentWindow?.postMessage({
+      type: 'od:srcdoc-transport-ready-probe',
+      generation,
+    }, '*');
+    if (useUrlLoadPreview || !srcDoc) return;
+    window.setTimeout(() => {
+      recoverUnacknowledgedSrcDocTransport(generation);
+    }, SRC_DOC_ACTIVATION_RECOVERY_TIMEOUT_MS);
+  }
   useEffect(() => {
     if (useUrlLoadPreview) {
       activatedSrcDocTransportHtmlRef.current = null;
@@ -14744,21 +15019,47 @@ function HtmlViewer({
             </button>
           ) : null}
           {rawCanShare || rawCanDownload ? (
-            <div className="chrome-file-action-menus" ref={shareRef}>
-              <div className="share-menu chrome-share-menu chrome-share-menu--unified">
-                {rawCanShare || rawCanDownload ? (
+            <div className="chrome-file-action-menus">
+              {/* Outside-click dismissal is scoped to the Share/Export pair —
+                  the handoff split button next door must count as "outside" so
+                  opening it closes this popover (and vice versa via the
+                  handoff button's own dismiss listener). */}
+              <div className="share-menu chrome-share-menu chrome-share-menu--unified" ref={shareRef}>
+                {/* Share and Export are separate header intents again (the
+                    0.18.0 unified tabs buried Export one level deep and export
+                    reach halved); they still share one popover shell so
+                    switching between them keeps the menu anchored in place.
+                    Export leads and carries the dark (primary) treatment —
+                    it is the far more used of the two (30-day: ~14k users
+                    exported successfully vs ~0.6k who attempted a deploy). */}
+                {rawCanDownload ? (
                   <button
                     type="button"
                     className={
-                      'chrome-action chrome-action-secondary chrome-action-with-label chrome-action-text-only chrome-action-unified chrome-action-share-dark' +
+                      'chrome-action chrome-action-secondary chrome-action-with-label chrome-action-text-only chrome-action-unified chrome-action-dark' +
                       (exportReadyNudge ? ' export-ready-nudge' : '')
                     }
                     aria-haspopup="menu"
-                    aria-expanded={deployMenuOpen}
+                    aria-expanded={deployMenuOpen && unifiedActionTab === 'export'}
+                    aria-label={t('fileViewer.unifiedExportTab')}
+                    disabled={viewerOnly}
+                    title={viewerOnly ? viewerOnlyDisabledTitle : undefined}
+                    onClick={openDownloadMenu}
+                  >
+                    <RemixIcon name="download-line" size={15} />
+                    <span>{t('fileViewer.unifiedExportTab')}</span>
+                  </button>
+                ) : null}
+                {rawCanShare ? (
+                  <button
+                    type="button"
+                    className="chrome-action chrome-action-secondary chrome-action-with-label chrome-action-text-only chrome-action-unified"
+                    aria-haspopup="menu"
+                    aria-expanded={deployMenuOpen && unifiedActionTab === 'share'}
                     aria-label={shareMenuLabel}
                     disabled={viewerOnly}
                     title={viewerOnly ? viewerOnlyDisabledTitle : undefined}
-                    onClick={rawCanShare ? openShareMenu : openDownloadMenu}
+                    onClick={openShareMenu}
                   >
                     <RemixIcon name="share-forward-line" size={15} />
                     <span>{shareMenuLabel}</span>
@@ -14766,42 +15067,34 @@ function HtmlViewer({
                 ) : null}
                 {deployMenuOpen && (rawCanShare || rawCanDownload) ? (
                   <div className="share-menu-popover chrome-unified-popover" role="menu">
-                    <div className="chrome-unified-tabs" role="tablist" aria-label={t('fileViewer.unifiedShareAria')}>
-                      {([
-                        ...(rawCanShare ? [['share', t('fileViewer.unifiedShareTab')] as const] : []),
-                        ...(rawCanDownload ? [['export', t('fileViewer.unifiedExportTab')] as const] : []),
-                        ['send', t('fileViewer.unifiedSendTab')] as const,
-                      ]).map(([tab, label]) => (
-                        <button
-                          key={tab}
-                          type="button"
-                          className={unifiedActionTab === tab ? 'is-active' : undefined}
-                          role="tab"
-                          aria-selected={unifiedActionTab === tab}
-                          onClick={() => setUnifiedActionTab(tab)}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
                     {unifiedActionTab === 'share' && rawCanShare ? (
                       <div className="chrome-unified-panel chrome-unified-panel--share">
                       {/* Team-only, same as ReactComponentViewer's copy of this card above —
                           see the comment there (recvq5bM78HWCE). */}
                       {workspaceContextHasTeamIdentity(workspaceContext) ? (
-                      <div className="chrome-share-card">
-                        <div className="chrome-share-card__header">
-                          <span className="share-menu-icon"><RemixIcon name="team-line" size={16} /></span>
-                          <span className="share-menu-text">
-                            <span>{t('fileViewer.workspaceShareTitle')}</span>
-                            <small>
-                              {shareAccess === 'private'
-                                ? t('fileViewer.workspaceSharePrivateDescription')
-                                : t('fileViewer.workspaceShareWorkspaceDescription')}
-                            </small>
-                          </span>
-                        </div>
-                        <div className="chrome-access-select">
+                      <>
+                      {/* Access control gets the same section-label + row treatment as the
+                          publish / deploy / save tiers below; its explanation moves into the
+                          trailing "?" instead of a card sub-line. */}
+                      <div className="share-menu-section-label share-menu-section-label--help" role="presentation">
+                        <span>{t('fileViewer.workspaceShareTitle')}</span>
+                        <button
+                          type="button"
+                          className="share-menu-help od-tooltip"
+                          data-testid="workspace-access-help"
+                          aria-label={shareAccess === 'private'
+                            ? t('fileViewer.workspaceSharePrivateDescription')
+                            : t('fileViewer.workspaceShareWorkspaceDescription')}
+                          data-tooltip={shareAccess === 'private'
+                            ? t('fileViewer.workspaceSharePrivateDescription')
+                            : t('fileViewer.workspaceShareWorkspaceDescription')}
+                          data-tooltip-placement="bottom"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <RemixIcon name="question-line" size={14} />
+                        </button>
+                      </div>
+                      <div className="chrome-access-select">
                           <button
                             type="button"
                             className="chrome-access-trigger"
@@ -14855,25 +15148,38 @@ function HtmlViewer({
                             </div>
                           ) : null}
                         </div>
-                      </div>
+                      </>
                       ) : null}
+                      {/* Publishing is a menu row like every other action in
+                          this panel (deploy, save-as-template): same section
+                          label, same icon + label row, with a trailing "?"
+                          whose tooltip explains reach and the single-file
+                          limitation. The published state swaps the row for the
+                          link block (content, not an action). */}
                       {canPublishPublic ? (
-                      <div className="chrome-share-card">
-                        <div className="chrome-share-card__header">
-                          <span className="share-menu-icon"><RemixIcon name="broadcast-line" size={16} /></span>
-                          <span className="share-menu-text">
-                            <span>{t('fileViewer.publishSingleFileTitle')}</span>
-                            <small>{t('fileViewer.publishSingleFileDescription')}</small>
-                          </span>
-                        </div>
-                        {publishFailureKey ? (
-                          <p className="chrome-publish-error" role="status">
-                            {t(publishFailureKey)}
-                          </p>
-                        ) : null}
-                        {filePublished ? (
-                          <>
-                            <div className="chrome-publish-url" title={publishedFileUrl}>
+                      <>
+                      {/* The "?" lives on the section label, not inside the publish
+                          menuitem: activating it is a help-discovery gesture, and
+                          nesting it in the row would make that gesture publish a
+                          public link (no hover-only path exists on touch). Same
+                          structure as the workspace-access help above. */}
+                      <div className="share-menu-section-label share-menu-section-label--help" role="presentation">
+                        <span>{t('fileViewer.shareMenuPublishViaOd')}</span>
+                        <button
+                          type="button"
+                          className="share-menu-help od-tooltip"
+                          data-testid="publish-help"
+                          aria-label={t('fileViewer.publishSingleFileDescription')}
+                          data-tooltip={t('fileViewer.publishSingleFileDescription')}
+                          data-tooltip-placement="bottom"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <RemixIcon name="question-line" size={14} />
+                        </button>
+                      </div>
+                      {filePublished ? (
+                        <div className="chrome-publish-plain">
+                          <div className="chrome-publish-url" title={publishedFileUrl}>
                               {publishedFileUrl}
                             </div>
                             <div className="chrome-publish-actions">
@@ -14901,29 +15207,152 @@ function HtmlViewer({
                               >
                                 {t('fileViewer.unpublishFile')}
                               </button>
-                            </div>
-                          </>
-                        ) : (
-                          <button
-                            type="button"
-                            className="chrome-publish-primary"
-                            disabled={viewerOnly || publishingPublicFile}
-                            aria-busy={publishingPublicFile}
-                            title={viewerOnly ? viewerOnlyDisabledTitle : undefined}
-                            onClick={() => {
-                              void publishCurrentFilePublic();
-                            }}
-                          >
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="share-menu-item"
+                          role="menuitem"
+                          disabled={viewerOnly || publishingPublicFile}
+                          aria-busy={publishingPublicFile}
+                          title={viewerOnly ? viewerOnlyDisabledTitle : undefined}
+                          onClick={() => {
+                            void publishCurrentFilePublic();
+                          }}
+                        >
+                          <span className="share-menu-icon">
                             <RemixIcon
                               name={publishingPublicFile ? 'loader-4-line' : 'upload-cloud-2-line'}
                               size={15}
                               className={publishingPublicFile ? 'icon-spin' : undefined}
                             />
-                            {publishingPublicFile ? t('fileViewer.publishingFile') : t('fileViewer.publishFile')}
-                          </button>
-                        )}
-                      </div>
+                          </span>
+                          <span>{publishingPublicFile ? t('fileViewer.publishingFile') : t('fileViewer.publishSingleFileTitle')}</span>
+                        </button>
+                      ) }
+                      {publishFailureKey ? (
+                        <p className="chrome-publish-error" role="status">
+                          {t(publishFailureKey)}
+                        </p>
                       ) : null}
+                      </>
+                      ) : null}
+                      {/* The share panel is organized by intent, not by
+                          backend: the publish card above is the hero "get a
+                          link" path; social icons appear only once ANY link
+                          exists (published or deployed); Vercel/Cloudflare are
+                          the secondary "more ways to publish" tier; save-as-
+                          template keeps its spot at the bottom. */}
+                      {/* Icons only for a CLEAN link (published file or a
+                          deployment whose share page is live) — a protected or
+                          still-preparing deployment must not hand out a URL
+                          that recipients cannot open. */}
+                      {activeProjectSocialShare && (shareableDeploymentUrl || publishedFileUrl) ? (
+                        <>
+                          <div className="share-menu-section-label" role="presentation">
+                            {t('socialShare.projectSection')}
+                          </div>
+                          <SocialShareGrid share={activeProjectSocialShare} />
+                        </>
+                      ) : null}
+                      <div className="share-menu-divider" />
+                      <div className="share-menu-section-label" role="presentation">
+                        {t('fileViewer.shareMenuPublishOnline')}
+                      </div>
+                      {DEPLOY_PROVIDER_OPTIONS.map((option) => (
+                        <button
+                          key={option.id}
+                          type="button"
+                          className="share-menu-item"
+                          role="menuitem"
+                          disabled={streaming || viewerOnly}
+                          title={
+                            viewerOnly
+                              ? viewerOnlyDisabledTitle
+                              : streaming
+                                ? t('fileViewer.shareAfterGenerationComplete')
+                                : undefined
+                          }
+                          onClick={() => {
+                            void openDeployModal(option.id);
+                          }}
+                        >
+                          <span className="share-menu-icon"><RemixIcon name={deployActionIconFor(option.id)} size={15} /></span>
+                          <span>{deployActionLabelFor(option.id)}</span>
+                        </button>
+                      ))}
+                      {sharePageUrl ? (
+                        <>
+                          <button
+                            type="button"
+                            className="share-menu-item"
+                            role="menuitem"
+                            disabled={!canCopyShareLink || viewerOnly}
+                            title={
+                              viewerOnly
+                                ? viewerOnlyDisabledTitle
+                                : canCopyShareLink
+                                  ? undefined
+                                  : shareUnavailableHint
+                            }
+                            onClick={() => {
+                              void copyShareLink(sharePageUrl);
+                            }}
+                          >
+                            <span className="share-menu-icon"><RemixIcon name="file-copy-line" size={15} /></span>
+                            <span>{copyShareLinkLabel}</span>
+                          </button>
+                          <button
+                            type="button"
+                            className="share-menu-item"
+                            role="menuitem"
+                            disabled={!canOpenSharePage || viewerOnly}
+                            title={
+                              viewerOnly
+                                ? viewerOnlyDisabledTitle
+                                : canOpenSharePage
+                                  ? undefined
+                                  : shareLinkStatusHint || shareUnavailableHint
+                            }
+                            onClick={() => {
+                              if (!canOpenSharePage) return;
+                              window.open(sharePageUrl, '_blank', 'noopener');
+                            }}
+                          >
+                            <span className="share-menu-icon"><RemixIcon name="external-link-line" size={15} /></span>
+                            <span>{t('fileViewer.openSharePage')}</span>
+                          </button>
+                        </>
+                      ) : null}
+                      {sharePageUrl && (shareLinkStatusHint || shareUnavailableHint) ? (
+                        <div className="share-menu-section-label" role="presentation">
+                          {shareLinkStatusHint || shareUnavailableHint}
+                        </div>
+                      ) : null}
+                      <div className="share-menu-divider" />
+                      <div className="share-menu-section-label" role="presentation">
+                        {t('fileViewer.shareMenuSave')}
+                      </div>
+                      <button
+                        type="button"
+                        className="share-menu-item"
+                        role="menuitem"
+                        disabled={savingTemplate || viewerOnly}
+                        title={viewerOnly ? viewerOnlyDisabledTitle : undefined}
+                        onClick={() => {
+                          openSaveAsTemplateModal();
+                        }}
+                      >
+                        <span className="share-menu-icon"><RemixIcon name="file-copy-line" size={15} /></span>
+                        <span>
+                          {savingTemplate
+                            ? t('fileViewer.savingTemplate')
+                            : templateNote
+                              ? templateNote
+                              : t('fileViewer.saveAsTemplate')}
+                        </span>
+                      </button>
                       </div>
                     ) : null}
                     {unifiedActionTab === 'export' && rawCanDownload ? (
@@ -15204,6 +15633,18 @@ function HtmlViewer({
                   </div>
                 ) : null}
               </div>
+              {viewerOnly ? null : (
+                <HandoffButton
+                  projectId={projectId}
+                  projectName={projectName}
+                  projectDir={projectDir}
+                  agents={agents}
+                  artifactId={artifactId}
+                  artifactKind={handoffArtifactKind}
+                  metricsConsent={metricsConsent}
+                  installationId={installationId}
+                />
+              )}
             </div>
           ) : null}
       </>) : null}
@@ -15418,10 +15859,7 @@ function HtmlViewer({
                           }
                           if (useLazySrcDocTransport) setSrcDocShellReady(true);
                           activateLoadedSrcDocTransport(frame);
-                          frame?.contentWindow?.postMessage({
-                            type: 'od:srcdoc-transport-ready-probe',
-                            generation: srcDocTransportGeneration,
-                          }, '*');
+                          verifyLoadedSrcDocTransport(frame);
                           dcViewportRestoreAtRef.current = Date.now();
                           frame?.contentWindow?.postMessage({
                             type: '__dc_set_viewport',

@@ -3010,6 +3010,15 @@ export async function startServer({
     verifyExplicitWorkspaceRequestContext({ req }, { fresh: false });
   const verifyWorkspaceRequestAuthority = (req: unknown) =>
     verifyExplicitWorkspaceRequestContext({ req });
+  const verifyPersonalProjectDeleteLeaseAuthority =
+    process.env.OD_WORKSPACE_CONTEXT_SOURCE?.trim() === 'vela'
+      ? (req: unknown) => verifyWorkspaceRequestContext({
+          req,
+          // A miss is intentionally returned as unavailable. The project gate
+          // then falls through to the existing fresh authority verifier.
+          fetchWorkspaceDirectory: workspaceDirectoryAuthority.cached,
+        })
+      : undefined;
   const enforceAuthoritativeProjectMutation = createEnforceWorkspaceProjectMutation(
     verifyWorkspaceRequestAuthority,
   );
@@ -6641,6 +6650,7 @@ export async function startServer({
   const uploadDeps = { upload, importUpload, handleProjectUpload };
   const projectStoreDeps = {
     getProject,
+    findTeamWorkspaceIdForProject,
     getWorkspaceProject,
     getWorkspaceProjectByProjectId,
     listWorkspaceProjectBindings,
@@ -7023,6 +7033,7 @@ export async function startServer({
     // workspaceContext) — see the mutation-gate cross-check note above.
     verifyWorkspaceReadAuthority,
     verifyWorkspaceRequestAuthority,
+    verifyPersonalProjectDeleteLeaseAuthority,
     authorizeProjectRequest,
     isProjectRevoked: (projectId) =>
       revokedTeamProjectMirrors.has(projectId),
@@ -9435,6 +9446,15 @@ export async function startServer({
             projectRoot: artifactBaseline.cwd,
             diff,
           };
+          run.artifactPaths = diff.touchedPaths
+            .map((filePath) => path.relative(artifactBaseline.cwd, filePath))
+            .map((filePath) => filePath.replaceAll('\\', '/'))
+            .filter((filePath) =>
+              filePath.length > 0 &&
+              filePath !== '..' &&
+              !filePath.startsWith('../') &&
+              !path.isAbsolute(filePath),
+            );
         } catch {
           outcome = fallbackOutcome();
         }
@@ -9990,6 +10010,7 @@ export async function startServer({
         ...(failure?.failure_category ? { failure_category: failure.failure_category } : {}),
         ...(failure?.failure_detail ? { failure_detail: failure.failure_detail } : {}),
         ...(failure?.failure_stage ? { failure_stage: failure.failure_stage } : {}),
+        ...(failure?.terminal_trigger ? { terminal_trigger: failure.terminal_trigger } : {}),
         ...(errorCode ? { error_code: errorCode } : {}),
       };
     };
@@ -10063,6 +10084,7 @@ export async function startServer({
       // this reset, a clean-but-empty attempt 1 would vouch for a crashed
       // attempt 2, classifying the run 'succeeded' off a stale flag.
       run.turnCompletedCleanly = false;
+      run.terminalTrigger = null;
       lifecycle.resetForAttempt(run.retryAttemptCount ?? 0);
       run.analyticsTelemetry = {
         startRequestedAt: run.analyticsTelemetry?.startRequestedAt ?? run.createdAt,
@@ -10202,6 +10224,8 @@ export async function startServer({
         },
         ...(errorCode ? { errorCode } : {}),
         agentId: run.agentId,
+        cancelOrigin: run.cancelOrigin ?? null,
+        terminalTrigger: run.terminalTrigger ?? null,
         events: run.events,
       });
       if (
@@ -11175,6 +11199,9 @@ export async function startServer({
           'Retry the turn, pick a different model, or start a new conversation if the prior context is very large.';
         stallPayload = createSseErrorPayload('AGENT_EXECUTION_FAILED', message, { retryable: true });
       }
+      run.terminalTrigger = reason === 'first_output'
+        ? 'first_output_deadline'
+        : 'inactivity_watchdog';
       send('error', stallPayload);
       // A silent first-token hang is one of the safe transient failure shapes
       // this run is allowed to recover: classifyRunFailure maps the stall text
@@ -12537,6 +12564,12 @@ export async function startServer({
       emitVisibleAgentStderr(chunk);
     });
 
+    // A retry reuses the same run object but replaces run.child. Treat that
+    // exact child identity as the attempt generation token: once ownership has
+    // moved, this attempt may still receive a late error/close event, but it
+    // must not emit errors, unregister the new sink, or make a terminal retry
+    // decision for the new attempt.
+    const attemptStillOwnsRun = () => run.child === child;
     const finishCanceledIfRequested = (
       code: number | null,
       signal: NodeJS.Signals | null,
@@ -12555,6 +12588,7 @@ export async function startServer({
       cleanupPromptFile();
       flushVisibleAgentStderr();
       revokeToolToken('child_exit');
+      if (!attemptStillOwnsRun()) return;
       unregisterChatAgentEventSink();
       if (finishCanceledIfRequested(1, null)) return;
       send('error', createSseErrorPayload('AGENT_EXECUTION_FAILED', err.message));
@@ -12566,12 +12600,10 @@ export async function startServer({
       clearFirstOutputWatchdog();
       clearForcedChildShutdown();
       flushVisibleAgentStderr();
-      if (watchdogRetryRestarted) {
-        // The inactivity watchdog already failed this attempt and the same-run
-        // retry restarted on a fresh child. Finalization and event-sink / run-
-        // handle ownership (keyed by the shared runId) now belong to the new
-        // attempt, so this stalled child's close must not re-run them — doing
-        // so would re-finalize the run and delete the new attempt's sink.
+      if (!attemptStillOwnsRun() || watchdogRetryRestarted) {
+        // Finalization and event-sink / run-handle ownership (keyed by the
+        // shared runId) now belong to another retry generation, so this
+        // child's late close must not re-run them.
         // Revoke only THIS attempt's tool token (idempotent, keyed by its own
         // token string) and bail; the `finally` block still cleans up logs.
         revokeToolToken('child_exit');
