@@ -3,120 +3,161 @@
 <head>
 <meta charset="UTF-8" />
 <title>数据周报 · 2025 年 5 月</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-  body { background:#fafaf7; font-family:'Inter','Noto Sans SC',sans-serif; color:#15140f; -webkit-font-smoothing:antialiased; }
+  * { box-sizing:border-box; margin:0; }
+  body { background:#fafaf7; font-family:'Inter','Noto Sans SC',-apple-system,'Segoe UI',sans-serif; color:#15140f; -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:1152px; margin:0 auto; padding:48px 32px; }
   .num { font-family:'Inter',sans-serif; font-feature-settings:'tnum' on; letter-spacing:-0.02em; }
-  .section h2 { font-size:11px; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:#5a564e; margin:0 0 16px; }
+  .mono { font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .muted { color:#5a564e; }
+  .card { background:#fff; border:1px solid #e7e5e0; border-radius:16px; padding:20px; box-shadow:0 1px 0 #f0ece5; }
+  header.report { padding-bottom:28px; margin-bottom:32px; border-bottom:1px solid #e7e5e0; }
+  .head-row { display:flex; align-items:baseline; justify-content:space-between; flex-wrap:wrap; gap:12px; }
+  .eyebrow { font-size:11px; font-weight:600; letter-spacing:0.22em; text-transform:uppercase; color:#c96442; margin-bottom:8px; }
+  h1 { font-size:36px; font-weight:800; letter-spacing:-0.02em; }
+  .head-meta { font-size:12px; color:#5a564e; text-align:right; line-height:1.7; }
+  .head-meta strong { color:#15140f; }
+  .lede { margin-top:12px; font-size:14px; color:#5a564e; max-width:672px; line-height:1.7; }
+  .section { margin-bottom:40px; }
+  .section h2 { font-size:11px; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:#5a564e; margin-bottom:16px; }
+  .grid-kpi { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; }
+  .grid-charts { display:grid; grid-template-columns:2fr 1fr; gap:16px; }
+  .grid-insights { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; }
+  .kpi-label { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; color:#5a564e; margin-bottom:8px; }
+  .kpi-value { font-size:30px; font-weight:800; line-height:1.1; }
+  .kpi-value .unit { font-size:16px; color:#5a564e; }
+  .kpi-delta { font-size:12px; margin-top:8px; }
+  .delta-up { color:#1f7a3a; font-weight:600; }
+  .delta-down { color:#9c2a25; font-weight:600; }
+  .spark { margin-top:12px; height:40px; }
+  .spark svg { width:100%; height:100%; display:block; }
+  .chart-title { font-size:14px; font-weight:600; margin-bottom:12px; }
+  .chart-box { position:relative; height:260px; }
+  .chart-box svg { width:100%; height:100%; display:block; }
+  .legend { display:flex; gap:16px; justify-content:center; margin-top:10px; font-size:12px; color:#5a564e; }
+  .legend span { display:inline-flex; align-items:center; gap:6px; }
+  .legend i { width:8px; height:8px; border-radius:50%; display:inline-block; }
+  .table-card { border-radius:16px; border:1px solid #e7e5e0; overflow:hidden; background:#fff; }
   table { border-collapse:collapse; width:100%; font-size:13px; }
   thead th { background:#f4f1ec; text-align:left; padding:10px 14px; font-size:11px; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color:#5a564e; position:sticky; top:0; }
+  thead th.right { text-align:right; }
   tbody td { padding:10px 14px; border-bottom:1px solid #e7e5e0; }
   tbody tr:nth-child(even) { background:#fbfaf7; }
   tbody tr:hover { background:#f4f1ec; }
-  .delta-up { color:#1f7a3a; font-weight:600; }
-  .delta-down { color:#9c2a25; font-weight:600; }
+  td.right { text-align:right; }
+  .insight-emoji { font-size:30px; margin-bottom:8px; }
+  .insight-title { font-weight:600; margin-bottom:6px; }
+  .insight-body { font-size:14px; color:#5a564e; line-height:1.7; }
+  details.method { margin-top:48px; border-radius:12px; border:1px solid #e7e5e0; background:#fff; padding:20px; }
+  details.method summary { cursor:pointer; font-size:14px; font-weight:600; color:#5a564e; display:flex; align-items:center; justify-content:space-between; }
+  details.method .body { font-size:12px; color:#5a564e; line-height:1.7; margin-top:12px; max-width:768px; }
+  @media (max-width:900px) {
+    .grid-kpi { grid-template-columns:repeat(2,1fr); }
+    .grid-charts { grid-template-columns:1fr; }
+    .grid-insights { grid-template-columns:1fr; }
+  }
 </style>
 </head>
 <body>
 
-<div class="max-w-6xl mx-auto px-8 py-12">
+<div class="wrap">
 
-  <header class="pb-7 mb-8 border-b border-[#e7e5e0]">
-    <div class="flex items-baseline justify-between flex-wrap gap-3">
+  <header class="report">
+    <div class="head-row">
       <div>
-        <div class="text-[11px] font-semibold tracking-[0.22em] uppercase text-[#c96442] mb-2">Weekly Report · Week 19</div>
-        <h1 class="text-4xl font-extrabold tracking-tight">数据周报 · 2025 年 5 月</h1>
+        <div class="eyebrow">Weekly Report · Week 19</div>
+        <h1>数据周报 · 2025 年 5 月</h1>
       </div>
-      <div class="text-xs text-[#5a564e] text-right">
-        <div>来源: <span class="font-semibold text-[#15140f]">内部 BI</span></div>
-        <div>截止 <span class="font-mono text-[#15140f]">2025-05-11</span></div>
+      <div class="head-meta">
+        <div>来源: <strong>内部 BI</strong></div>
+        <div>截止 <span class="mono" style="color:#15140f">2025-05-11</span></div>
       </div>
     </div>
-    <p class="mt-3 text-sm text-[#5a564e] max-w-2xl leading-relaxed">本周关键指标全部向好。MAU 同比增长 184%, 付费转化与流失双双改善。</p>
+    <p class="lede">本周关键指标全部向好。MAU 同比增长 184%, 付费转化与流失双双改善。</p>
   </header>
 
-  <section class="section mb-10">
+  <section class="section">
     <h2>核心指标 · KPI</h2>
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-      <div class="rounded-2xl bg-white p-5 border border-[#e7e5e0] shadow-[0_1px_0_#f0ece5]">
-        <div class="text-[11px] font-semibold uppercase tracking-wider text-[#5a564e] mb-2">月活用户 · MAU</div>
-        <div class="text-3xl font-extrabold num">23,950</div>
-        <div class="text-xs mt-2"><span class="delta-up">▲ 16.0%</span> <span class="text-[#5a564e]">vs 上月</span></div>
-        <div class="mt-3" style="position:relative;height:40px"><canvas id="kpi1"></canvas></div>
+    <div class="grid-kpi">
+      <div class="card">
+        <div class="kpi-label">月活用户 · MAU</div>
+        <div class="kpi-value num">23,950</div>
+        <div class="kpi-delta"><span class="delta-up">▲ 16.0%</span> <span class="muted">vs 上月</span></div>
+        <div class="spark" id="kpi1"></div>
       </div>
-      <div class="rounded-2xl bg-white p-5 border border-[#e7e5e0] shadow-[0_1px_0_#f0ece5]">
-        <div class="text-[11px] font-semibold uppercase tracking-wider text-[#5a564e] mb-2">新增 · Signups</div>
-        <div class="text-3xl font-extrabold num">4,250</div>
-        <div class="text-xs mt-2"><span class="delta-up">▲ 15.5%</span> <span class="text-[#5a564e]">vs 上月</span></div>
-        <div class="mt-3" style="position:relative;height:40px"><canvas id="kpi2"></canvas></div>
+      <div class="card">
+        <div class="kpi-label">新增 · Signups</div>
+        <div class="kpi-value num">4,250</div>
+        <div class="kpi-delta"><span class="delta-up">▲ 15.5%</span> <span class="muted">vs 上月</span></div>
+        <div class="spark" id="kpi2"></div>
       </div>
-      <div class="rounded-2xl bg-white p-5 border border-[#e7e5e0] shadow-[0_1px_0_#f0ece5]">
-        <div class="text-[11px] font-semibold uppercase tracking-wider text-[#5a564e] mb-2">付费 · Paying</div>
-        <div class="text-3xl font-extrabold num">2,418 <span class="text-base text-[#5a564e]">/ 10.1%</span></div>
-        <div class="text-xs mt-2"><span class="delta-up">▲ 18.5%</span> <span class="text-[#5a564e]">vs 上月</span></div>
-        <div class="mt-3" style="position:relative;height:40px"><canvas id="kpi3"></canvas></div>
+      <div class="card">
+        <div class="kpi-label">付费 · Paying</div>
+        <div class="kpi-value num">2,418 <span class="unit">/ 10.1%</span></div>
+        <div class="kpi-delta"><span class="delta-up">▲ 18.5%</span> <span class="muted">vs 上月</span></div>
+        <div class="spark" id="kpi3"></div>
       </div>
-      <div class="rounded-2xl bg-white p-5 border border-[#e7e5e0] shadow-[0_1px_0_#f0ece5]">
-        <div class="text-[11px] font-semibold uppercase tracking-wider text-[#5a564e] mb-2">流失 · Churn</div>
-        <div class="text-3xl font-extrabold num">1.8%</div>
-        <div class="text-xs mt-2"><span class="delta-up">▼ 0.1pp</span> <span class="text-[#5a564e]">vs 上月</span></div>
-        <div class="mt-3" style="position:relative;height:40px"><canvas id="kpi4"></canvas></div>
+      <div class="card">
+        <div class="kpi-label">流失 · Churn</div>
+        <div class="kpi-value num">1.8%</div>
+        <div class="kpi-delta"><span class="delta-up">▼ 0.1pp</span> <span class="muted">vs 上月</span></div>
+        <div class="spark" id="kpi4"></div>
       </div>
     </div>
   </section>
 
-  <section class="section mb-10">
+  <section class="section">
     <h2>趋势 · Growth</h2>
-    <div class="grid lg:grid-cols-3 gap-4">
-      <div class="lg:col-span-2 rounded-2xl bg-white p-5 border border-[#e7e5e0]">
-        <div class="text-sm font-semibold mb-3">MAU & 付费用户增长</div>
-        <div style="position:relative;height:260px"><canvas id="chart-main"></canvas></div>
+    <div class="grid-charts">
+      <div class="card">
+        <div class="chart-title">MAU &amp; 付费用户增长</div>
+        <div class="chart-box" id="chart-main"></div>
+        <div class="legend">
+          <span><i style="background:rgba(201,100,66,0.55)"></i>MAU</span>
+          <span><i style="background:#1f7a3a"></i>付费</span>
+        </div>
       </div>
-      <div class="rounded-2xl bg-white p-5 border border-[#e7e5e0]">
-        <div class="text-sm font-semibold mb-3">流失率 · 月度</div>
-        <div style="position:relative;height:260px"><canvas id="chart-churn"></canvas></div>
+      <div class="card">
+        <div class="chart-title">流失率 · 月度</div>
+        <div class="chart-box" id="chart-churn"></div>
       </div>
     </div>
   </section>
 
-  <section class="section mb-10">
+  <section class="section">
     <h2>明细 · Raw data</h2>
-    <div class="rounded-2xl border border-[#e7e5e0] overflow-hidden bg-white">
+    <div class="table-card">
       <table>
-        <thead><tr><th>月份</th><th class="text-right">MAU</th><th class="text-right">新增</th><th class="text-right">付费</th><th class="text-right">流失率</th></tr></thead>
+        <thead><tr><th>月份</th><th class="right">MAU</th><th class="right">新增</th><th class="right">付费</th><th class="right">流失率</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
     </div>
   </section>
 
-  <section class="section mb-10">
+  <section class="section">
     <h2>洞察 · Insights</h2>
-    <div class="grid md:grid-cols-3 gap-4">
-      <div class="rounded-2xl bg-white p-5 border border-[#e7e5e0]">
-        <div class="text-3xl mb-2">📈</div>
-        <div class="font-semibold mb-1.5">MAU 半年增长 184%</div>
-        <div class="text-sm text-[#5a564e] leading-relaxed">主要来自小红书自然流量, 单条爆款笔记带来 8k+ 新增。</div>
+    <div class="grid-insights">
+      <div class="card">
+        <div class="insight-emoji">📈</div>
+        <div class="insight-title">MAU 半年增长 184%</div>
+        <div class="insight-body">主要来自小红书自然流量, 单条爆款笔记带来 8k+ 新增。</div>
       </div>
-      <div class="rounded-2xl bg-white p-5 border border-[#e7e5e0]">
-        <div class="text-3xl mb-2">💰</div>
-        <div class="font-semibold mb-1.5">付费转化 7.3% → 10.1%</div>
-        <div class="text-sm text-[#5a564e] leading-relaxed">团队 Pro 套餐贡献最大。新引导流程 + 30 天试用是关键。</div>
+      <div class="card">
+        <div class="insight-emoji">💰</div>
+        <div class="insight-title">付费转化 7.3% → 10.1%</div>
+        <div class="insight-body">团队 Pro 套餐贡献最大。新引导流程 + 30 天试用是关键。</div>
       </div>
-      <div class="rounded-2xl bg-white p-5 border border-[#e7e5e0]">
-        <div class="text-3xl mb-2">🎯</div>
-        <div class="font-semibold mb-1.5">月流失 3.4% → 1.8%</div>
-        <div class="text-sm text-[#5a564e] leading-relaxed">AI 起草功能上线后, 沉默用户激活率翻倍。</div>
+      <div class="card">
+        <div class="insight-emoji">🎯</div>
+        <div class="insight-title">月流失 3.4% → 1.8%</div>
+        <div class="insight-body">AI 起草功能上线后, 沉默用户激活率翻倍。</div>
       </div>
     </div>
   </section>
 
-  <details class="mt-12 rounded-xl border border-[#e7e5e0] bg-white p-5">
-    <summary class="cursor-pointer text-sm font-semibold text-[#5a564e] flex items-center justify-between">
-      方法论 · Methodology <span class="text-[#5a564e]">▾</span>
-    </summary>
-    <div class="text-xs text-[#5a564e] leading-relaxed mt-3 max-w-3xl">
+  <details class="method">
+    <summary>方法论 · Methodology <span class="muted">▾</span></summary>
+    <div class="body">
       MAU = 30 天内至少打开一次产品的去重用户。付费 = 当月有效付费订阅。流失率 = 上月付费但本月未续的比例。数据来自内部 BI, 已剔除测试账号与 bot。
     </div>
   </details>
@@ -124,6 +165,9 @@
 </div>
 
 <script>
+// Self-contained report: the daemon serves plugin previews under a strict CSP
+// (`connect-src 'none'`, scripts/styles from 'self' + inline only), so every
+// chart here is inline SVG instead of a CDN chart library.
 const data = [
   {month:'2024-09', mau:8420,  signups:1240, paying:612,  churn:0.034},
   {month:'2024-10', mau:9180,  signups:1380, paying:701,  churn:0.031},
@@ -138,36 +182,107 @@ const data = [
 
 document.getElementById('rows').innerHTML = data.map(d => `
   <tr>
-    <td class="font-mono text-xs">${d.month}</td>
-    <td class="text-right num">${d.mau.toLocaleString()}</td>
-    <td class="text-right num">${d.signups.toLocaleString()}</td>
-    <td class="text-right num">${d.paying.toLocaleString()}</td>
-    <td class="text-right num">${(d.churn*100).toFixed(1)}%</td>
+    <td class="mono" style="font-size:12px">${d.month}</td>
+    <td class="right num">${d.mau.toLocaleString()}</td>
+    <td class="right num">${d.signups.toLocaleString()}</td>
+    <td class="right num">${d.paying.toLocaleString()}</td>
+    <td class="right num">${(d.churn*100).toFixed(1)}%</td>
   </tr>
 `).join('');
 
-const sparkOpts = { responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false},tooltip:{enabled:false}}, scales:{x:{display:false},y:{display:false}}, elements:{point:{radius:0},line:{tension:0.4,borderWidth:2}} };
-new Chart(document.getElementById('kpi1'), { type:'line', data:{labels:data.map(d=>d.month), datasets:[{data:data.map(d=>d.mau), borderColor:'#c96442', fill:false}]}, options:sparkOpts });
-new Chart(document.getElementById('kpi2'), { type:'line', data:{labels:data.map(d=>d.month), datasets:[{data:data.map(d=>d.signups), borderColor:'#e9b94a', fill:false}]}, options:sparkOpts });
-new Chart(document.getElementById('kpi3'), { type:'line', data:{labels:data.map(d=>d.month), datasets:[{data:data.map(d=>d.paying), borderColor:'#1f7a3a', fill:false}]}, options:sparkOpts });
-new Chart(document.getElementById('kpi4'), { type:'line', data:{labels:data.map(d=>d.month), datasets:[{data:data.map(d=>d.churn*100), borderColor:'#2348b8', fill:false}]}, options:sparkOpts });
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function el(name, attrs) {
+  const node = document.createElementNS(SVG_NS, name);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  return node;
+}
+function scale(values, min, max) {
+  const span = max - min || 1;
+  return values.map(v => (v - min) / span);
+}
+// Sparkline: stroke-only polyline, no axes, `none` aspect so it stretches.
+function sparkline(container, values, color) {
+  const svg = el('svg', { viewBox:'0 0 100 28', preserveAspectRatio:'none' });
+  const t = scale(values, Math.min(...values), Math.max(...values));
+  const pts = t.map((v, i) => `${(i/(values.length-1))*100},${28 - v*24 - 2}`).join(' ');
+  svg.appendChild(el('polyline', {
+    points: pts, fill:'none', stroke: color, 'stroke-width':'2',
+    'vector-effect':'non-scaling-stroke', 'stroke-linecap':'round', 'stroke-linejoin':'round',
+  }));
+  container.appendChild(svg);
+}
+sparkline(document.getElementById('kpi1'), data.map(d=>d.mau), '#c96442');
+sparkline(document.getElementById('kpi2'), data.map(d=>d.signups), '#e9b94a');
+sparkline(document.getElementById('kpi3'), data.map(d=>d.paying), '#1f7a3a');
+sparkline(document.getElementById('kpi4'), data.map(d=>d.churn*100), '#2348b8');
 
-new Chart(document.getElementById('chart-main'), {
-  type:'bar',
-  data:{
-    labels:data.map(d=>d.month),
-    datasets:[
-      {label:'MAU', data:data.map(d=>d.mau), backgroundColor:'rgba(201,100,66,0.18)', borderColor:'#c96442', borderWidth:1.5, borderRadius:4, yAxisID:'y'},
-      {label:'付费', type:'line', data:data.map(d=>d.paying), borderColor:'#1f7a3a', backgroundColor:'#1f7a3a', tension:0.35, borderWidth:2.5, pointRadius:3, yAxisID:'y'},
-    ]
-  },
-  options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'bottom',labels:{usePointStyle:true,boxWidth:8}}}, scales:{x:{grid:{display:false}},y:{grid:{color:'#f0ece5'}, ticks:{callback:v=>v.toLocaleString()}}} }
+// Fixed-size axis chart with grid lines, bars/line, and month labels.
+function axisChart(container, draw) {
+  const W = 640, H = 240, PAD = { l:52, r:12, t:12, b:26 };
+  const svg = el('svg', { viewBox:`0 0 ${W} ${H}` });
+  draw(svg, W, H, PAD);
+  container.appendChild(svg);
+}
+function yTicks(max, count) {
+  const step = Math.pow(10, Math.floor(Math.log10(max / count)));
+  const candidates = [1, 2, 2.5, 5, 10].map(m => m * step);
+  const nice = candidates.find(c => max / c <= count) ?? candidates[candidates.length - 1];
+  const ticks = [];
+  for (let v = 0; v <= max; v += nice) ticks.push(v);
+  if (ticks[ticks.length - 1] < max) ticks.push(ticks[ticks.length - 1] + nice);
+  return ticks;
+}
+
+axisChart(document.getElementById('chart-main'), (svg, W, H, P) => {
+  const plotW = W - P.l - P.r, plotH = H - P.t - P.b;
+  const ticks = yTicks(Math.max(...data.map(d=>d.mau)), 4);
+  const yMax = ticks[ticks.length - 1];
+  const x = i => P.l + (i + 0.5) * (plotW / data.length);
+  const y = v => P.t + plotH - (v / yMax) * plotH;
+  for (const t of ticks) {
+    svg.appendChild(el('line', { x1:P.l, x2:W-P.r, y1:y(t), y2:y(t), stroke:'#f0ece5', 'stroke-width':'1' }));
+    const label = el('text', { x:P.l-8, y:y(t)+4, 'text-anchor':'end', fill:'#5a564e', 'font-size':'10' });
+    label.textContent = t.toLocaleString();
+    svg.appendChild(label);
+  }
+  const barW = plotW / data.length * 0.55;
+  data.forEach((d, i) => {
+    svg.appendChild(el('rect', {
+      x:x(i)-barW/2, y:y(d.mau), width:barW, height:y(0)-y(d.mau), rx:4,
+      fill:'rgba(201,100,66,0.18)', stroke:'#c96442', 'stroke-width':'1.5',
+    }));
+    const mLabel = el('text', { x:x(i), y:H-8, 'text-anchor':'middle', fill:'#5a564e', 'font-size':'9' });
+    mLabel.textContent = d.month.slice(5);
+    svg.appendChild(mLabel);
+  });
+  const linePts = data.map((d, i) => `${x(i)},${y(d.paying)}`).join(' ');
+  svg.appendChild(el('polyline', { points:linePts, fill:'none', stroke:'#1f7a3a', 'stroke-width':'2.5', 'stroke-linecap':'round', 'stroke-linejoin':'round' }));
+  data.forEach((d, i) => svg.appendChild(el('circle', { cx:x(i), cy:y(d.paying), r:3, fill:'#1f7a3a' })));
 });
 
-new Chart(document.getElementById('chart-churn'), {
-  type:'line',
-  data:{ labels:data.map(d=>d.month), datasets:[{label:'流失率 %', data:data.map(d=>(d.churn*100).toFixed(2)), borderColor:'#9c2a25', backgroundColor:'rgba(156,42,37,0.08)', tension:0.4, borderWidth:2.5, fill:true, pointRadius:3}] },
-  options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}}, scales:{x:{grid:{display:false}},y:{grid:{color:'#f0ece5'}, ticks:{callback:v=>v+'%'}, beginAtZero:true}} }
+axisChart(document.getElementById('chart-churn'), (svg, W, H, P) => {
+  const plotW = W - P.l - P.r, plotH = H - P.t - P.b;
+  const values = data.map(d=>d.churn*100);
+  const ticks = yTicks(Math.ceil(Math.max(...values) * 10) / 10, 4);
+  const yMax = ticks[ticks.length - 1];
+  const x = i => P.l + (i + 0.5) * (plotW / data.length);
+  const y = v => P.t + plotH - (v / yMax) * plotH;
+  for (const t of ticks) {
+    svg.appendChild(el('line', { x1:P.l, x2:W-P.r, y1:y(t), y2:y(t), stroke:'#f0ece5', 'stroke-width':'1' }));
+    const label = el('text', { x:P.l-8, y:y(t)+4, 'text-anchor':'end', fill:'#5a564e', 'font-size':'10' });
+    label.textContent = `${t}%`;
+    svg.appendChild(label);
+  }
+  const area = `M ${x(0)},${y(0)} ` + values.map((v, i) => `L ${x(i)},${y(v)}`).join(' ') + ` L ${x(values.length-1)},${y(0)} Z`;
+  svg.appendChild(el('path', { d:area, fill:'rgba(156,42,37,0.08)' }));
+  const linePts = values.map((v, i) => `${x(i)},${y(v)}`).join(' ');
+  svg.appendChild(el('polyline', { points:linePts, fill:'none', stroke:'#9c2a25', 'stroke-width':'2.5', 'stroke-linecap':'round', 'stroke-linejoin':'round' }));
+  values.forEach((v, i) => svg.appendChild(el('circle', { cx:x(i), cy:y(v), r:3, fill:'#9c2a25' })));
+  data.forEach((d, i) => {
+    const mLabel = el('text', { x:x(i), y:H-8, 'text-anchor':'middle', fill:'#5a564e', 'font-size':'9' });
+    mLabel.textContent = d.month.slice(5);
+    svg.appendChild(mLabel);
+  });
 });
 </script>
 

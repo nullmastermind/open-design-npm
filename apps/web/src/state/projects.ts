@@ -2421,7 +2421,11 @@ async function readPluginMarketplaceOutcome(
   };
 }
 
-export async function applyPlugin(
+export type PluginApplyOutcome =
+  | { ok: true; result: ApplyResult }
+  | { ok: false; message: string; status?: number };
+
+export async function applyPluginWithOutcome(
   pluginId: string,
   options: {
     inputs?: Record<string, unknown>;
@@ -2430,7 +2434,7 @@ export async function applyPlugin(
     locale?: string;
     workspaceContext?: WorkspaceCollabContext | null;
   } = {},
-): Promise<ApplyResult | null> {
+): Promise<PluginApplyOutcome> {
   try {
     const resp = await fetch(
       `/api/plugins/${encodeURIComponent(pluginId)}/apply`,
@@ -2450,12 +2454,27 @@ export async function applyPlugin(
         }),
       },
     );
-    if (!resp.ok) return null;
-    const json = (await resp.json()) as ApplyResult & { ok?: boolean };
-    return json;
+    if (!resp.ok) {
+      return { ok: false, message: await readErrorMessage(resp), status: resp.status };
+    }
+    return { ok: true, result: (await resp.json()) as ApplyResult };
   } catch {
-    return null;
+    return { ok: false, message: 'Unable to reach the daemon.' };
   }
+}
+
+export async function applyPlugin(
+  pluginId: string,
+  options: {
+    inputs?: Record<string, unknown>;
+    projectId?: string;
+    grantCaps?: string[];
+    locale?: string;
+    workspaceContext?: WorkspaceCollabContext | null;
+  } = {},
+): Promise<ApplyResult | null> {
+  const outcome = await applyPluginWithOutcome(pluginId, options);
+  return outcome.ok ? outcome.result : null;
 }
 
 async function readErrorMessage(resp: Response): Promise<string> {

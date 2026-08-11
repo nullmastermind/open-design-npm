@@ -21,7 +21,6 @@ import {
   type ReactNode,
   type SetStateAction,
 } from 'react';
-import { createPortal } from 'react-dom';
 import {
   defaultScenarioPluginIdForProjectMetadata,
   type AmrWalletSnapshot,
@@ -40,8 +39,6 @@ import {
   trackOnboardingCompleteResult,
   trackOnboardingRuntimeScanResult,
   trackPageView,
-  trackDeepSeekCampaignBadgeClick,
-  trackDeepSeekCampaignBadgeSurfaceView,
 } from '../analytics/events';
 import {
   amrHandoffDeviceId,
@@ -139,9 +136,6 @@ import {
   workspaceBillingSummaryForContext,
 } from '../collab/useWorkspaceContext';
 import { useWorkspaceInvalidation } from '../collab/workspace-events';
-import { resolvePlanLabelTier } from '../collab/team-plan';
-import { resolveDeepSeekV4FlashCampaignAudience } from '../campaigns/deepseek-v4-flash';
-import { useDeepSeekV4FlashCampaignVisibility } from '../campaigns/use-deepseek-v4-flash-campaign';
 import {
   beginWorkspaceScopedRead,
   workspaceIdentityCacheKey,
@@ -223,9 +217,6 @@ import {
 import { enterpriseUrl } from './enterpriseUrl';
 import { resolveByokModelPreference } from './byok/validation';
 import onboardingSourceStyles from './OnboardingModelSource.module.css';
-
-const DEEPSEEK_CAMPAIGN_PRICING_URL =
-  'https://open-design.ai/zh/pricing/?source=desktop_campaign_badge';
 
 // Persist the entry nav-rail open/collapsed state so it survives both a
 // home -> project -> home navigation (EntryShell unmounts on the project
@@ -416,12 +407,6 @@ interface Props {
   // During a transient Cloud outage it prevents the rail from presenting a
   // still-signed-in user as signed out.
   amrLoggedIn?: boolean | null;
-  /**
-   * vela login-status account/user plan (ACCOUNT-scoped). Used for personal
-   * workspaces so a confirmed free account is not stuck as campaign audience
-   * `unknown` while billing summary leaves `membershipTier` empty.
-   */
-  amrAccountPlan?: string | null;
   daemonLive: boolean;
   onModeChange: (mode: ExecMode) => void;
   onAgentChange: (id: string) => void;
@@ -548,7 +533,6 @@ export function EntryShell({
   agents,
   agentsLoading = false,
   amrLoggedIn = null,
-  amrAccountPlan = null,
   daemonLive,
   onModeChange,
   onAgentChange,
@@ -614,24 +598,6 @@ export function EntryShell({
     workspaceBillingResponse,
     workspaceContext,
   );
-  const deepSeekCampaignVisibility = useDeepSeekV4FlashCampaignVisibility();
-  // Same personal-vs-team accountPlan rule as App's `resolvedAmrPlan`.
-  const deepSeekCampaignPlan = resolvePlanLabelTier({
-    billing: workspaceBilling,
-    context: workspaceContext,
-    accountPlan:
-      workspaceLoading || workspaceContext?.workspaceType === 'team'
-        ? null
-        : amrAccountPlan?.trim() || null,
-  });
-  const deepSeekV4FlashCampaignAudience = resolveDeepSeekV4FlashCampaignAudience({
-    // Subscription is the only campaign segmentation axis. In particular,
-    // `resolvePlanLabelTier` turns the backend-confirmed unsubscribed state into
-    // `free`; wallet balance / historical recharge never upgrades this audience.
-    plan: deepSeekCampaignPlan,
-    loggedIn: amrLoggedIn,
-    now: deepSeekCampaignVisibility.now,
-  });
   const workspaceBalanceUsd = workspaceBillingBalanceUsd(
     workspaceBillingResponse,
     workspaceContext,
@@ -1075,64 +1041,6 @@ export function EntryShell({
     scrollContainer.scrollTop = 0;
   }, [view]);
   const analytics = useAnalytics();
-  useEffect(() => {
-    if (view !== 'home' || deepSeekV4FlashCampaignAudience === 'unknown') return;
-    trackDeepSeekCampaignBadgeSurfaceView(analytics.track, {
-      page_name: 'home',
-      area: 'campaign_badge',
-      element: 'deepseek_v4_flash',
-      campaign_id: 'deepseek_v4_flash',
-      user_state: deepSeekV4FlashCampaignAudience,
-    });
-  }, [analytics.track, deepSeekV4FlashCampaignAudience, view]);
-  const openDeepSeekCampaignPricing = useCallback(() => {
-    if (deepSeekV4FlashCampaignAudience === 'unknown') return;
-    trackDeepSeekCampaignBadgeClick(analytics.track, {
-      page_name: 'home',
-      area: 'campaign_badge',
-      element: 'open_pricing',
-      campaign_id: 'deepseek_v4_flash',
-      user_state: deepSeekV4FlashCampaignAudience,
-    });
-    const attribution = recordAmrEntry(
-      analytics.track,
-      'deepseek_workbench_badge',
-      new Date(),
-      {
-        metricsConsent: config.telemetry?.metrics === true,
-        campaignId: 'deepseek_v4_flash',
-        conversionSource: 'deepseek_workbench_badge',
-      },
-    );
-    const deviceId = amrHandoffDeviceId({
-      metricsConsent: config.telemetry?.metrics === true,
-      resolvedDeviceId: getResolvedDeviceId(),
-      installationId: config.installationId,
-    });
-    window.open(
-      attributedAmrUrl(DEEPSEEK_CAMPAIGN_PRICING_URL, attribution, deviceId),
-      '_blank',
-      'noopener,noreferrer',
-    );
-  }, [
-    analytics.track,
-    config.installationId,
-    config.telemetry?.metrics,
-    deepSeekV4FlashCampaignAudience,
-  ]);
-  // 产品拍板 D5: the campaign modal's paid 立即使用 performs the REAL switch —
-  // daemon execution mode + Cloud agent (amr) + DeepSeek V4 Flash — through
-  // the same persistence callbacks the InlineModelSwitcher writes through.
-  // Mode must flip first: a paid user still on BYOK (`mode === 'api'`) would
-  // otherwise keep the BYOK provider even after agent/model ids change.
-  const applyDeepSeekCampaignModel = useCallback(
-    (agentId: string, modelId: string) => {
-      onModeChange('daemon');
-      onAgentChange(agentId);
-      onAgentModelChange(agentId, { model: modelId });
-    },
-    [onAgentChange, onAgentModelChange, onModeChange],
-  );
   function changeView(next: EntryViewKind) {
     const navElement = navElementForView(next);
     if (navElement) {
@@ -1538,23 +1446,6 @@ export function EntryShell({
               lives in the rail footer, and everything below is fixed-position
               or portalled so it occupies no layout space here. */}
           <WhatsNewPopup active={view === 'home'} />
-          {view === 'home'
-            && deepSeekV4FlashCampaignAudience !== 'unknown'
-            && typeof document !== 'undefined'
-            ? createPortal(
-              <button
-                type="button"
-                className="entry-deepseek-campaign-badge"
-                onClick={openDeepSeekCampaignPricing}
-                aria-label={t('campaign.deepseekV4Flash.workbenchBadgeAria')}
-                data-testid="deepseek-campaign-pricing-badge"
-              >
-                <span>{t('campaign.deepseekV4Flash.workbenchBadge')}</span>
-                <Icon name="arrow-right" size={13} />
-              </button>,
-              document.body,
-            )
-            : null}
           {amrBalanceGateBlock ? (
             <AmrBalanceDialog
               reason={amrBalanceGateBlock.reason}
@@ -1615,10 +1506,6 @@ export function EntryShell({
                 promptTemplates={promptTemplates}
                 executionSwitcher={view === 'home' ? homeExecutionSwitcher : undefined}
                 artifactUpgradeSlot={artifactUpgradeSlot}
-                deepSeekV4FlashCampaignAudience={deepSeekV4FlashCampaignAudience}
-                onDeepSeekV4FlashCampaignUseNow={applyDeepSeekCampaignModel}
-                deepSeekV4FlashCampaignMetricsConsent={config.telemetry?.metrics === true}
-                deepSeekV4FlashCampaignInstallationId={config.installationId ?? null}
               />
             </div>
             <div data-testid="entry-view-projects" data-active={view === 'projects' ? 'true' : 'false'} {...inactiveViewProps(view === 'projects')}>

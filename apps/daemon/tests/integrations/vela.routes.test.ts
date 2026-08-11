@@ -1891,6 +1891,37 @@ describe('POST /api/integrations/vela/login', () => {
     expect(body.error).toContain('profile "prod" api URL: is not configured');
   });
 
+
+  it('returns unavailable models when no AMR executable is configured', async () => {
+    const isolatedApp = express();
+    isolatedApp.use(express.json());
+    registerVelaRoutes(isolatedApp, {
+      paths: { RUNTIME_DATA_DIR: tmpHome },
+      appConfig: {
+        readAppConfig: async () => ({ agentCliEnv: {} }),
+      },
+      http: {},
+      env: {},
+    });
+    const isolatedServer = createServer(isolatedApp);
+    await new Promise<void>((resolve) => isolatedServer.listen(0, '127.0.0.1', resolve));
+    const address = isolatedServer.address() as AddressInfo;
+    try {
+      const response = await getJson<{
+        source?: string;
+        models?: unknown[];
+        unavailable?: boolean;
+      }>(`http://127.0.0.1:${address.port}/api/amr/models`);
+
+      expect(response).toEqual({
+        status: 200,
+        body: { source: 'unavailable', models: [], refreshing: false, unavailable: true },
+      });
+    } finally {
+      await new Promise<void>((resolve) => isolatedServer.close(() => resolve()));
+    }
+  });
+
   it('does not attach a stale attempt snapshot to a pre-spawn config failure', async () => {
     const staleAuthAttemptId = '936da01f-9abd-4d9d-80c7-02af85c822a8';
     const requestAuthAttemptId = 'd6633426-e179-40f5-9e02-bcba88bddcb5';

@@ -91,6 +91,15 @@ describe('team-projects coalescing key is shape-safe across call sites', () => {
     resetTeamProjectsCache();
   });
 
+  it('does not request collab status without workspace identity', async () => {
+    await expect(projectIsSharedWithWorkspace('p-local', null)).resolves.toBe(false);
+
+    const collabStatusCalls = vi.mocked(globalThis.fetch).mock.calls.filter(([url]) => (
+      String(url).includes('/api/projects/p-local/collab/status')
+    ));
+    expect(collabStatusCalls).toHaveLength(0);
+  });
+
   it('useTeamProjects() still yields an ARRAY when a project page primed the shared cache first', async () => {
     // 1. Project page: caches the team directory under the shared key.
     await projectIsSharedWithWorkspace('p-shared', TEAM_CONTEXT);

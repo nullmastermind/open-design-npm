@@ -147,12 +147,13 @@ export interface AgentsResponse {
   agents: AgentInfo[];
 }
 
-export type AmrModelsSource = 'preset' | 'remote';
+export type AmrModelsSource = 'preset' | 'remote' | 'unavailable';
 
 export interface AmrModelsResponse {
   source: AmrModelsSource;
   models: AgentModelOption[];
   refreshing: boolean;
+  unavailable?: boolean;
   stale?: boolean;
   remoteError?: string;
 }

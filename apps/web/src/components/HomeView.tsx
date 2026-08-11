@@ -37,7 +37,7 @@ import {
   trackRecentProjectsClick,
 } from '../analytics/events';
 import {
-  applyPlugin,
+  applyPluginWithOutcome,
   createProject,
   duplicatePluginAsProject,
   listPlugins,
@@ -132,8 +132,6 @@ import { RecentProjectsStrip } from './RecentProjectsStrip';
 import type { Recommendation } from '../onboarding/recommendation';
 import type { OnboardingEntry } from '../onboarding/onboarding-entry';
 import { AnimatePresence } from 'motion/react';
-import { DeepSeekV4FlashCampaign } from './DeepSeekV4FlashCampaign';
-import type { DeepSeekV4FlashCampaignAudience } from '../campaigns/deepseek-v4-flash';
 
 export interface ActivePlugin {
   record: InstalledPluginRecord;
@@ -286,15 +284,6 @@ interface Props {
   onRecommendationDismiss?: () => void;
   executionSwitcher?: ReactNode;
   artifactUpgradeSlot?: ReactNode;
-  deepSeekV4FlashCampaignAudience?: DeepSeekV4FlashCampaignAudience;
-  /** Real model switch for the campaign modal's paid 立即使用 CTA (D5).
-   *  EntryShell owns the agent/model persistence callbacks; HomeView only
-   *  threads them through, like the audience above. */
-  onDeepSeekV4FlashCampaignUseNow?: (agentId: string, modelId: string) => void;
-  /** Telemetry opt-in + install id for the modal's consent-gated AMR
-   *  attribution — EntryShell reads them off config, HomeView threads. */
-  deepSeekV4FlashCampaignMetricsConsent?: boolean;
-  deepSeekV4FlashCampaignInstallationId?: string | null;
 }
 
 const EMPTY_DESIGN_SYSTEMS: DesignSystemSummary[] = [];
@@ -438,10 +427,6 @@ export function HomeView({
   onRecommendationDismiss,
   executionSwitcher,
   artifactUpgradeSlot,
-  deepSeekV4FlashCampaignAudience = 'unknown',
-  onDeepSeekV4FlashCampaignUseNow,
-  deepSeekV4FlashCampaignMetricsConsent = false,
-  deepSeekV4FlashCampaignInstallationId = null,
 }: Props) {
   const { locale, t } = useI18n();
   const analytics = useAnalytics();
@@ -1276,7 +1261,7 @@ export function HomeView({
     }
     if (!shouldResolveImmediately) return true;
 
-    const result = await resolveActivePlugin(record, optimisticInputs, applyRequestId);
+    const { result, message } = await resolveActivePlugin(record, optimisticInputs, applyRequestId);
     if (activePluginApplyRequestRef.current !== applyRequestId) return false;
     if (!result) {
       // Roll back the optimistic active so submit can't fire against a
@@ -1284,7 +1269,7 @@ export function HomeView({
       // still matches the visible active state — concurrent clicks
       // would otherwise stomp a successful later apply.
       setActive((prev) => (prev?.record.id === record.id ? { ...prev, inputsValid: false } : prev));
-      setError(`Failed to apply ${record.title}. Make sure the daemon is reachable.`);
+      setError(message ?? `Failed to apply ${record.title}. Make sure the daemon is reachable.`);
       return false;
     }
     const reconciledInputs: Record<string, unknown> = { ...optimisticInputs };
@@ -1360,7 +1345,7 @@ export function HomeView({
     record: InstalledPluginRecord,
     inputs: Record<string, unknown>,
     applyRequestId?: number,
-  ): Promise<ApplyResult | null> {
+  ): Promise<{ result: ApplyResult | null; message?: string }> {
     setPendingApplyId(record.id);
     let writeWorkspaceContext;
     try {
@@ -1376,12 +1361,12 @@ export function HomeView({
         setPendingApplyId(null);
         setPendingChipId(null);
       }
-      setError(
-        'Workspace context is unavailable. Try again when workspace sync finishes.',
-      );
-      return null;
+      return {
+        result: null,
+        message: 'Workspace context is unavailable. Try again when workspace sync finishes.',
+      };
     }
-    const result = await applyPlugin(record.id, {
+    const outcome = await applyPluginWithOutcome(record.id, {
       locale,
       inputs,
       workspaceContext: writeWorkspaceContext,
@@ -1390,7 +1375,9 @@ export function HomeView({
       setPendingApplyId(null);
       setPendingChipId(null);
     }
-    return result;
+    return outcome.ok
+      ? { result: outcome.result }
+      : { result: null, message: outcome.message };
   }
 
   function requestActivePlugin(
@@ -2366,7 +2353,10 @@ export function HomeView({
         ? !inputsEqual(submittedActive.result?.appliedPlugin?.inputs ?? submittedActive.inputs, submittedPluginInputs)
         : false;
       if (submittedActive && (!submittedActive.result || activeInputsChangedForSubmit)) {
-        const result = await resolveActivePlugin(submittedActive.record, submittedPluginInputs);
+        const { result, message } = await resolveActivePlugin(
+          submittedActive.record,
+          submittedPluginInputs,
+        );
         if (!result) {
           // The daemon is the authority on required inputs, and it rejects a
           // missing one with MissingInputError. Name the fields it would have
@@ -2376,7 +2366,7 @@ export function HomeView({
           setError(
             missing.length > 0
               ? missingRequiredInputsMessage(missing)
-              : `Failed to apply ${submittedActive.record.title}. Check the plugin parameters and try again.`,
+              : message ?? `Failed to apply ${submittedActive.record.title}. Check the plugin parameters and try again.`,
           );
           return;
         }
@@ -2525,16 +2515,6 @@ export function HomeView({
       data-testid="home-view"
       ref={homeViewRef}
     >
-      {/* `active` gates the portal-escaping campaign dialog to the ACTIVE home
-          view: EntryShell only hides inactive views with display:none, which a
-          document.body portal ignores. */}
-      <DeepSeekV4FlashCampaign
-        audience={deepSeekV4FlashCampaignAudience}
-        active={isActive}
-        onUseCampaignModel={onDeepSeekV4FlashCampaignUseNow}
-        metricsConsent={deepSeekV4FlashCampaignMetricsConsent}
-        installationId={deepSeekV4FlashCampaignInstallationId}
-      />
       {isActive ? <AppWashKineticGrid clipBottomTo=".home-hero" /> : null}
       <HomeHero
         workspaceContext={workspaceContext}

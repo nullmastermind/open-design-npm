@@ -16,9 +16,10 @@ export async function projectIsSharedWithWorkspace(
   projectId: string,
   workspaceContext: WorkspaceCollabContext | null,
 ): Promise<boolean> {
+  if (!workspaceContext) return false;
   try {
     const body = await fetchProjectCollabStatus(projectId, {
-      ...(workspaceContext ? { workspaceContext } : {}),
+      workspaceContext,
     });
     if (body) {
       if (typeof body.ownerMemberId === 'string' && body.ownerMemberId.trim()) return true;
@@ -27,7 +28,6 @@ export async function projectIsSharedWithWorkspace(
   } catch {
     // Fall through to the team-project directory below.
   }
-  if (!workspaceContext) return false;
   try {
     const projects = await fetchTeamProjectsCatalog({ context: workspaceContext });
     return projects.some((project) => project.projectId === projectId);

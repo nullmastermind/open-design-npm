@@ -500,6 +500,14 @@ export function registerVelaRoutes(app: Express, deps: RegisterVelaRoutesDeps): 
       });
       res.json(response);
     } catch (err) {
+      if (err instanceof Error && err.message === 'AMR vela binary could not be resolved') {
+        return res.json({
+          source: 'unavailable',
+          models: [],
+          refreshing: false,
+          unavailable: true,
+        });
+      }
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });

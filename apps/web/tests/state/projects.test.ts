@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   applyPlugin,
+  applyPluginWithOutcome,
   cacheTabsLocally,
   contributeGeneratedPluginToOpenDesign,
   createConversation,
@@ -291,6 +292,20 @@ describe('applyPlugin', () => {
       inputs: {},
       grantCaps: [],
       locale: 'zh-CN',
+    });
+  });
+
+  it('preserves the daemon error when plugin apply is rejected', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(
+      JSON.stringify({ error: 'workspace access denied' }),
+      { status: 403, headers: { 'content-type': 'application/json' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(applyPluginWithOutcome('example-web-prototype')).resolves.toEqual({
+      ok: false,
+      message: 'workspace access denied',
+      status: 403,
     });
   });
 
