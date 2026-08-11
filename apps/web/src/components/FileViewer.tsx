@@ -15240,22 +15240,9 @@ function HtmlViewer({
                       ) : null}
                       {/* The share panel is organized by intent, not by
                           backend: the publish card above is the hero "get a
-                          link" path; social icons appear only once ANY link
-                          exists (published or deployed); Vercel/Cloudflare are
-                          the secondary "more ways to publish" tier; save-as-
-                          template keeps its spot at the bottom. */}
-                      {/* Icons only for a CLEAN link (published file or a
-                          deployment whose share page is live) — a protected or
-                          still-preparing deployment must not hand out a URL
-                          that recipients cannot open. */}
-                      {activeProjectSocialShare && (shareableDeploymentUrl || publishedFileUrl) ? (
-                        <>
-                          <div className="share-menu-section-label" role="presentation">
-                            {t('socialShare.projectSection')}
-                          </div>
-                          <SocialShareGrid share={activeProjectSocialShare} />
-                        </>
-                      ) : null}
+                          link" path; Vercel/Cloudflare are the secondary
+                          "more ways to publish" tier; save-as-template keeps
+                          its spot at the bottom. */}
                       <div className="share-menu-divider" />
                       <div className="share-menu-section-label" role="presentation">
                         {t('fileViewer.shareMenuPublishOnline')}
@@ -15613,21 +15600,6 @@ function HtmlViewer({
                           : t('fileViewer.saveAsTemplate')}
                     </span>
                   </button>
-                      </div>
-                    ) : null}
-                    {unifiedActionTab === 'send' ? (
-                      <div className="chrome-unified-panel chrome-unified-panel--handoff">
-                        <HandoffButton
-                          projectId={projectId}
-                          projectName={projectName}
-                          projectDir={projectDir}
-                          agents={agents}
-                          artifactId={artifactId}
-                          artifactKind={handoffArtifactKind}
-                          metricsConsent={metricsConsent}
-                          installationId={installationId}
-                          embedded
-                        />
                       </div>
                     ) : null}
                   </div>
