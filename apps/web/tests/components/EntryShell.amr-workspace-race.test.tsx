@@ -151,7 +151,6 @@ describe('EntryShell AMR workspace precheck race', () => {
           connectorsLoading={false}
           config={amrConfig()}
           agents={[amrAgent()]}
-          amrLoggedIn
           daemonLive
           onModeChange={vi.fn()}
           onAgentChange={vi.fn()}

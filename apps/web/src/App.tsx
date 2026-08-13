@@ -4959,7 +4959,6 @@ function AppInner() {
         defaultDesignSystemId={config.designSystemId}
         agents={agents}
         agentsLoading={agentsLoading}
-        amrLoggedIn={amrLoginStatus?.loggedIn ?? null}
         config={config}
         providerModelsCache={providerModelsCache}
         onProviderModelsCacheChange={setProviderModelsCache}
@@ -5008,7 +5007,6 @@ function AppInner() {
         onOpenSettings={openSettings}
         onCompleteOnboarding={handleCompleteOnboarding}
         onSignedOut={handleActiveCloudSignOut}
-        onAmrLoginStatusChange={handleAmrLoginStatusChange}
         artifactUpgradeSlot={
           amrArtifactUpgradeHomeOffer ? (
             <AmrArtifactUpgradeHomeCard

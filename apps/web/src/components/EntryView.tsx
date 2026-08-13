@@ -43,7 +43,6 @@ import type {
   PluginShareAction,
   PluginShareProjectOutcome,
 } from '../state/projects';
-import type { VelaLoginStatus } from '../providers/daemon';
 
 type EntryCreateProjectInput = Omit<CreateInput, 'metadata'> & {
   metadata?: CreateInput['metadata'];
@@ -78,7 +77,6 @@ interface Props {
   // Forwarded to EntryShell → OnboardingView so the AMR cloud card can show a
   // detecting/skeleton state while the cold-start agent stream is in flight.
   agentsLoading?: boolean;
-  amrLoggedIn?: boolean | null;
   // Execution / model-switching context forwarded to the EntryShell so the
   // sticky top-bar can expose the active CLI/BYOK + model and persist
   // changes through the same channels as the project view.
@@ -147,7 +145,6 @@ interface Props {
   onOpenSettings: (section?: 'execution' | 'media' | 'composio' | 'orbit' | 'integrations' | 'mcpClient' | 'language' | 'appearance' | 'notifications' | 'pet' | 'projectLocations' | 'library' | 'about' | 'memory' | 'designSystems') => void;
   onCompleteOnboarding: () => void;
   onSignedOut?: () => void | Promise<void>;
-  onAmrLoginStatusChange?: (status: VelaLoginStatus | null) => void;
   artifactUpgradeSlot?: ReactNode;
 }
 
@@ -255,7 +252,6 @@ export function EntryView({
   defaultDesignSystemId,
   agents,
   agentsLoading,
-  amrLoggedIn,
   config,
   providerModelsCache,
   onProviderModelsCacheChange,
@@ -297,7 +293,6 @@ export function EntryView({
   onOpenSettings,
   onCompleteOnboarding,
   onSignedOut,
-  onAmrLoginStatusChange,
   artifactUpgradeSlot,
 }: Props) {
   const [connectors, setConnectors] = useState<ConnectorDetail[]>([]);
@@ -387,7 +382,6 @@ export function EntryView({
       onProviderModelsCacheChange={onProviderModelsCacheChange}
       agents={agents}
       {...(agentsLoading !== undefined ? { agentsLoading } : {})}
-      {...(amrLoggedIn !== undefined ? { amrLoggedIn } : {})}
       daemonLive={daemonLive}
       onModeChange={onModeChange}
       onAgentChange={onAgentChange}
@@ -420,7 +414,6 @@ export function EntryView({
       onOpenSettings={onOpenSettings}
       onCompleteOnboarding={onCompleteOnboarding}
       onSignedOut={onSignedOut}
-      onAmrLoginStatusChange={onAmrLoginStatusChange}
       artifactUpgradeSlot={artifactUpgradeSlot}
     />
   );

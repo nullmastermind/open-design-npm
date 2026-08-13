@@ -285,7 +285,7 @@ describe('App onboarding completion persistence', () => {
     vi.clearAllMocks();
   });
 
-  it('clears only execution and onboarding state for an active Cloud sign-out', () => {
+  it('clears only execution state and keeps onboarding completed for an active Cloud sign-out', () => {
     const current = {
       ...returningUserConfig(),
       mode: 'api',
@@ -327,8 +327,8 @@ describe('App onboarding completion persistence', () => {
     } as AppConfig;
 
     expect(resetExecutionConfigAfterSignOut(current)).toMatchObject({
-      onboardingCompleted: false,
-      mode: 'daemon',
+      onboardingCompleted: true,
+      mode: 'api',
       agentId: null,
       agentModels: {},
       agentCliEnv: {},
@@ -365,11 +365,13 @@ describe('App onboarding completion persistence', () => {
       await entryViewCapture.activeSignOut?.();
     });
 
-    expect(screen.getByTestId('onboarding-completed').textContent).toBe('false');
+    // Sign-out clears execution state but no longer re-gates the user into
+    // first-run onboarding: completion is preserved.
+    expect(screen.getByTestId('onboarding-completed').textContent).toBe('true');
     expect(screen.getByTestId('agent-id').textContent).toBe('none');
     expect(mockedSyncConfigToDaemon).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        onboardingCompleted: false,
+        onboardingCompleted: true,
         mode: 'daemon',
         agentId: null,
         apiKey: '',
