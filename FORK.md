@@ -91,3 +91,14 @@ directly on the model-source chooser.
 - Created `FORK.md` (this file) recording all fork-local changes above.
 - `CLAUDE.md` — references `FORK.md` and the rule that every change must be
   appended to its change log.
+
+### 2026-08-13 — add `sync-upstream` skill (safe upstream sync)
+
+- `.claude/skills/sync-upstream/SKILL.md` — manual upstream sync/merge
+  workflow that respects local code + FORK.md: no `-X ours` (it silently
+  corrupts deletion regions), FORK.md-first conflict resolution (upstream
+  version as base, fork behavior re-applied against current symbol names),
+  parse gate + web typecheck + focused onboarding tests before any push,
+  FORK.md change-log entry, and user approval before landing on main.
+  The automated `.github/workflows/sync-fork.yml` still uses `-X ours`; the
+  skill is the safe manual path until that workflow is reworked.
