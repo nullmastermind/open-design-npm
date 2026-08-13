@@ -460,13 +460,11 @@ export interface AppConfig {
   allowSilentUpdates?: boolean;
   // Privacy preferences governing what (if anything) is shipped to the
   // PostHog / Langfuse telemetry endpoints. `metrics` and `content`
-  // default ON (set by `DEFAULT_CONFIG.telemetry` in state/config.ts) so
-  // the onboarding funnel actually captures the first-run events. The
-  // post-onboarding disclosure modal explains this and Settings → Privacy is
-  // the one-click opt-out. Complete-context object manifests follow the
-  // content switch. A daemon-stored override always wins over these client
-  // defaults — once the user picks a value the modal / PrivacySection persist
-  // it through `syncConfigToDaemon`.
+  // default OFF (set by `DEFAULT_CONFIG.telemetry` in state/config.ts).
+  // Settings → Privacy is the opt-in. Complete-context object manifests
+  // follow the content switch. A daemon-stored override always wins over
+  // these client defaults — once the user picks a value PrivacySection
+  // persists it through `syncConfigToDaemon`.
   telemetry?: TelemetryConfig;
   customInstructions?: string;
   projectLocations?: ProjectLocationPrefs[];

@@ -17,14 +17,12 @@ import { agentCliEnvForAgent, readAppConfig, writeAppConfig } from '../src/app-c
 import { isLocalSameOrigin } from '../src/origin-validation.js';
 
 // Default telemetry preference applied when an existing config has no
-// telemetry block (fresh install, pre-disclosure). See
+// telemetry block (fresh install). See
 // `app-config.ts#applyTelemetryDefaults` and `state/config.ts#DEFAULT_CONFIG`
-// for the matching client default. Tests that previously expected an
-// empty `{}` are now updated to expect this default; tests confirming
-// "user opted out → stays opted out" assert on `metrics: false`.
+// for the matching client default. Fresh installs default to Don't share.
 const DEFAULT_TELEMETRY = {
-  metrics: true,
-  content: true,
+  metrics: false,
+  content: false,
 } as const;
 
 describe('app-config', () => {

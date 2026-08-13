@@ -643,7 +643,7 @@ describe('packaged launch scenarios', () => {
 describe('real fresh-install app-config response', () => {
   // Byte-shaped like the daemon's actual fresh reply: `readAppConfig` ->
   // `applyTelemetryDefaults({})`.
-  const FRESH_INSTALL_BODY = { config: { telemetry: { content: true, metrics: true } } };
+  const FRESH_INSTALL_BODY = { config: { telemetry: { content: false, metrics: false } } };
 
   const virtualClock = () => {
     let t = 0;

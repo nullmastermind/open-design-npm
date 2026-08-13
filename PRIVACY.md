@@ -11,8 +11,8 @@ runtime or provider you choose.
 
 Open Design has two telemetry classes:
 
-- **Product analytics and quality traces** are on by default and can be
-  disabled or narrowed under **Settings → Privacy**.
+- **Product analytics and quality traces** are off by default and can be
+  enabled or narrowed under **Settings → Privacy**.
 - **Safety and reliability telemetry** is always enabled in builds configured
   with a telemetry destination. It is limited, scrubbed, and used to diagnose
   crashes, startup failures, broken streams, and similar product-health
@@ -21,18 +21,14 @@ Open Design has two telemetry classes:
 Forks and development builds without telemetry destination credentials send
 neither class.
 
-## Product analytics are opt-out
+## Product analytics are opt-in
 
-Usage telemetry is **on by default**. On first run the app shows a privacy
-disclosure banner so you can see what is collected before doing anything else.
-The banner asks you to choose **Share** or **Don’t share**.
-Choosing **Share** keeps product analytics and quality traces enabled; choosing
-**Don’t share** disables those optional channels.
+Usage telemetry is **off by default**. Optional product analytics and quality
+traces stay off until you enable them under **Settings → Privacy**.
 
-You stay in control of the optional channels: the banner points you to
-**Settings → Privacy**, where you can toggle the categories below and change
-your decision at any time. The safety/reliability exception above is not an
-optional product-analytics category.
+You stay in control of the optional channels: toggle the categories below and
+change your decision at any time. The safety/reliability exception above is not
+an optional product-analytics category.
 
 ## What is collected
 
