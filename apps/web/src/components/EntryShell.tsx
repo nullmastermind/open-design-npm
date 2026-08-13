@@ -160,6 +160,7 @@ import {
   createProject,
   duplicatePluginAsProject,
   patchProject,
+  ProjectCreateError,
   resolvedWorkspaceContextForWrite,
   type PluginShareAction,
   type PluginShareProjectOutcome,
@@ -1242,7 +1243,7 @@ export function EntryShell({
         examplePromptBrief: payload.examplePromptContext.brief,
       } : {}),
     };
-    return onCreateProject({
+    const createInput: EntryCreateProjectInput = {
       name,
       skillId: payload.skillId ?? null,
       designSystemId: payload.designSystemId ?? null,
@@ -1265,7 +1266,20 @@ export function EntryShell({
       // require for write access.
       autoSendFirstMessage: true,
       ...(amrGatePrecheckWitness ? { amrGatePrecheckWitness } : {}),
-    });
+    };
+    const create = () => Promise.resolve(onCreateProject(createInput));
+    try {
+      return await create();
+    } catch (error) {
+      if (
+        error instanceof ProjectCreateError
+        && error.code === 'AMR_AUTH_REQUIRED'
+      ) {
+        navigate({ kind: 'home', view: 'onboarding' }, { replace: true });
+        return 'blocked' as const;
+      }
+      throw error;
+    }
   }
 
   /**
