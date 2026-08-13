@@ -220,8 +220,6 @@ describe('EntryShell AMR workspace precheck race', () => {
           connectorsLoading={false}
           config={amrConfig()}
           agents={[amrAgent()]}
-          amrLoggedIn
-          amrSessionState="reauth_required"
           daemonLive
           onModeChange={vi.fn()}
           onAgentChange={vi.fn()}
@@ -304,8 +302,6 @@ describe('EntryShell AMR workspace precheck race', () => {
           connectorsLoading={false}
           config={amrConfig()}
           agents={[amrAgent()]}
-          amrLoggedIn
-          amrSessionState="authenticated"
           daemonLive
           onModeChange={vi.fn()}
           onAgentChange={vi.fn()}
