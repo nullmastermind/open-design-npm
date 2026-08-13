@@ -31,11 +31,19 @@ described here instead of taking upstream's version verbatim.
   `settings.onboardingRecommended` — required by `apps/web/src/i18n/types.ts`
   in all 19 locales; `onboardingAmrModelSourceLabel` is still used by the AMR
   model picker.
-- Known pre-existing failures on `main` (not caused by this fork's edits):
-  `EntryShell.amr-workspace-race.test.tsx` (red), DeepSeek campaign /
-  `SettingsDialog.execution` / other red suites, and `pnpm guard` errors from
-  files absent in this fork (`.github/workflows/ci.yml`,
-  `apps/telemetry-worker/package.json`).
+- Known pre-existing failures on `main` (not caused by this fork's edits,
+  verified identical pre/post via a 2026-08-13 baseline comparison):
+  Windows-native environmental artifacts dominate — CRLF line endings vs
+  literal CSS assertions (`tests/styles/*`), `#!/usr/bin/env node` shim
+  spawns without Windows extensions (daemon `run-atomic-ownership`,
+  `stale-message-snapshot-preserves-daemon-events`, and POSIX-socket
+  daemon tests), plus `tests/state/config.test.ts`'s syncConfigToDaemon
+  ratchet test conflicting with this fork's `onboardingCompleted: true`
+  default. As of the 2026-08-13 sync, `EntryShell.amr-workspace-race` is
+  GREEN (its upstream gate-assertion tests were deleted), and the DeepSeek
+  campaign / `SettingsDialog.execution` suites pass on this machine.
+  `pnpm guard` still errors on files absent in this fork
+  (`.github/workflows/ci.yml`, `apps/telemetry-worker/package.json`).
 
 ## Change log
 
@@ -102,3 +110,79 @@ directly on the model-source chooser.
   FORK.md change-log entry, and user approval before landing on main.
   The automated `.github/workflows/sync-fork.yml` still uses `-X ours`; the
   skill is the safe manual path until that workflow is reworked.
+
+### 2026-08-13 — upstream sync `044324b9a..a1d279649` (24 commits, first safe-manual merge)
+
+First sync through the `sync-upstream` skill (no `-X ours`). Merged
+`upstream/main` into `sync/upstream-2026-08-13`, resolved 7 conflicted files,
+re-verified every FORK.md product decision against the merged tree, and
+repaired two auto-merge defects before landing.
+
+- **Modify/delete conflicts** — fork's deletion wins:
+  `.github/workflows/release-prerelease.yml` and `visual-baseline.yml`
+  `git rm`'d; `.github/workflows/` again contains only `publish-npm.yml` +
+  `sync-fork.yml`.
+- **Content conflicts** — all 17 blocks were upstream-only re-additions of
+  sign-in / gate machinery the fork removed (HEAD side empty in every block),
+  so each resolved to the fork side:
+  - `apps/web/src/App.tsx` — dropped the re-added `amrLoggedIn` /
+    `amrSessionState` / `amrAccountPlan` EntryView props.
+  - `apps/web/src/components/EntryView.tsx` — dropped the same prop
+    declaration / destructure / forwarding (3 blocks).
+  - `apps/web/src/components/EntryShell.tsx` — dropped 8 blocks:
+    CloudSignInTip + entry-rail-account-state imports, vela-login /
+    amrLoginPolling imports, the AMR prop declaration + destructure, the
+    rail-account-footer / re-gate effect block, `footerNotice`,
+    `amrSignedIn`, and the full `handleCloudSignIn` /
+    `handleAmrSignInToContinue` / `handleCancelAmrLogin` /
+    `pollAmrLoginCompletion` machinery. Two upstream auto-merged references
+    to those deleted symbols were repaired against fork names:
+    `handlePluginLoopSubmit`'s `amrAuthRequired` re-gate block removed, and
+    the rail's `context={railWorkspaceContext}` restored to
+    `context={workspaceContext}`.
+  - `apps/web/src/components/SettingsDialog.tsx` — dropped the sign-in
+    callout JSX (with its `AmrLoginPill`), `amrRevealPendingCancelAction`,
+    the coachmark JSX, and the AMR-authorize `AmrLoginPill` JSX (4 blocks).
+  - `apps/web/tests/components/EntryShell.onboarding.test.tsx` — kept the
+    fork's chooser-first signed-out test.
+- **Auto-merge defects repaired on the sync branch:**
+  - `EntryShell.amr-workspace-race.test.tsx` (+158 lines auto-merged) had
+    two new upstream tests asserting the sign-in gate behavior the fork
+    removed ("returns a definitively expired Cloud session to the existing
+    sign-in gate", "returns a submit-time auth rejection to sign-in…") plus
+    a third gate-flavored test. After first dropping the now-invalid
+    `amrLoggedIn` / `amrSessionState` props from their renders (same pattern
+    as the 2026-08-13 entry), all three gate-assertion tests were deleted;
+    the fork's workspace-B recheck test stays and passes.
+- **FORK.md decisions re-verified in the merged tree:**
+  `shouldRouteToFirstRunOnboarding` returns `false`;
+  `resetExecutionConfigAfterSignOut` keeps `onboardingCompleted: true` with
+  no forced `mode: 'daemon'`; onboarding starts at the model-source chooser
+  (`useState(1)`); the chooser is Local/BYOK only, default Local
+  (`modelSource: 'local' | 'byok'`). Intentionally-kept surfaces intact:
+  `AmrLoginPill`/`AmrBalanceDialog` in ChatPane, `entry-rail-account-state.ts`,
+  `amrLoginPolling.ts` (imported by App/SettingsDialog), the
+  `settings.onboardingCloud*` / `onboardingAmr*` / `onboardingRecommended`
+  i18n keys.
+- **New upstream surfaces taken as-is** (not gates; flagging per the
+  safe-manual rule): `fix(amr): recover expired cloud sessions` —
+  App.tsx's global vela poller now auto-recovers expired AMR sessions and
+  SettingsDialog's AMR card renders the sign-in pill (both optional
+  cloud-auth helper surfaces the fork keeps); the App-level
+  `cloudIdentityRejected` re-auth effect that navigates to onboarding when
+  an explicitly-selected AMR cloud identity rejects (no longer reachable
+  through the chooser since the Hosted option was removed).
+- **Gates:** parse gate OK (2993 files); `@open-design/web` typecheck 0
+  errors (post-repair); `@open-design/daemon` typecheck 0 errors; focused
+  onboarding suites 26/26 green; race suite green post-repair. Full
+  `@open-design/web` suite: 6334 passed / 40 failed — a baseline comparison
+  run of all 16 failing files against the pre-merge tree shows every failure
+  identical except the three gate-assertion tests above (deleted; file now
+  green). Daemon suite: full-run comparison skipped; the 7 new upstream test
+  files were run directly — 5 pass, 2 fail on Windows-native only
+  (`run-atomic-ownership`, `stale-message-snapshot-preserves-daemon-events`:
+  they spawn agent CLIs via `#!/usr/bin/env node` shim scripts with no
+  extension, which Windows cannot execute; same class as the documented
+  POSIX-socket environmental failures, not a merge defect).
+- Manifests changed (`apps/daemon`, `tools/pack` packages + lockfile) →
+  `pnpm install` run; `npm-package/` untouched.
